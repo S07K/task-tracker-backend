@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
 
-export interface EventType {
+export interface Event {
     id: string;
     groupId: string;
     allDay: boolean;
