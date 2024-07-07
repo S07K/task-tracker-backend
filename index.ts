@@ -24,7 +24,7 @@ main().catch((err) => console.log("Error in MongoDB connection", err));
 
 async function main() {
   await mongoose.connect(MONGODB_URL);
-  console.log("MogoDB connected!");
+  console.log("DB connected!");
   // use `await mongoose.connect('mongodb://user:password@127.0.0.1:27017/test');` if your database has auth enabled
 }
 
@@ -32,6 +32,7 @@ const apiResponse = (details: any) => {
   interface ApiResponse {
     message: string;
     events?: any;
+    event?: any;
     error?: {
       message: string;
       code: string;
@@ -47,7 +48,13 @@ const apiResponse = (details: any) => {
       },
     };
     return response;
-  } else {
+  } else if(details.event) {
+    const response: ApiResponse = {
+      message: details.message || "",
+      event: details.event || {},
+    };
+    return response;
+  } else if(details.events) {
     const response: ApiResponse = {
       message: details.message || "",
       events: details.events || {},
@@ -72,6 +79,18 @@ const ifEventExists = async (id: string) => {
 // api routes
 
 // add event route
+function generateEventId() {
+  // Get current timestamp in milliseconds
+  const timestamp = Date.now();
+  
+  // Generate a random number between 1000 and 9999
+  const randomNum = Math.floor(1000 + Math.random() * 9000);
+  
+  // Combine timestamp and random number to form the event ID
+  const eventId = `event_${timestamp}${randomNum}`;
+  
+  return eventId;
+}
 app.post("/addEvent", async (req, res) => {
   try {
     if (await ifEventExists(req.body.id)) {
@@ -86,31 +105,26 @@ app.post("/addEvent", async (req, res) => {
       );
       return;
     }
-    const startDate = new Date(req.body.start)
-      .toISOString()
-      .replace(/T.*$/, "");
-    console.log("startDate", startDate);
-    const endDate = new Date(req.body.end).toISOString().replace(/T.*$/, "");
     const NewEvent = new EventSchema({
-      id: req.body.id || "1",
-      groupId: req.body.groupId || "1",
+      id: generateEventId(),
+      // groupId: req.body.groupId || "1",
       allDay: req.body.allDay || false,
-      start: startDate || new Date().toISOString().replace(/T.*$/, ""),
-      end: endDate || null,
-      startStr: req.body.startStr || "2021-06-01",
-      endStr: req.body.endStr || "2021-06-01",
-      title: req.body.title || "New Event",
-      url: req.body.url || "https://www.google.com",
-      classNames: req.body.classNames || [],
-      editable: req.body.editable || null,
-      startEditable: req.body.startEditable || null,
-      durationEditable: req.body.durationEditable || null,
-      resourceEditable: req.body.resourceEditable || null,
-      display: req.body.display || "auto",
+      start: req.body.start,
+      end: req.body.end,
+      startStr: req.body.startStr,
+      endStr: req.body.endStr,
+      title: req.body.title,
+      url: req.body.url,
+      // classNames: req.body.classNames || [],
+      editable: req.body.editable || true,
+      startEditable: req.body.startEditable || true,
+      durationEditable: req.body.durationEditable || true,
+      resourceEditable: req.body.resourceEditable || true,
+      display: req.body.display || "block",
       overlap: req.body.overlap || true,
-      constraint: req.body.constraint || null,
-      backgroundColor: req.body.backgroundColor || "blue",
-      borderColor: req.body.borderColor || "blue",
+      constraint: req.body.constraint || "businessHours",
+      backgroundColor: req.body.backgroundColor,
+      borderColor: req.body.borderColor || "#efefef",
       textColor: req.body.textColor || "white",
       extendedProps: req.body.extendedProps || {},
       source: req.body.source || null,
@@ -119,7 +133,7 @@ app.post("/addEvent", async (req, res) => {
     res.send(
       apiResponse({
         message: "Event added successfully",
-        events: NewEvent,
+        event: NewEvent,
       })
     );
   } catch (error: any) {
@@ -207,7 +221,44 @@ app.get("/searchEvent/:id", async (req, res) => {
       res.send(
         apiResponse({
           message: "Event found",
-          events: event,
+          event: event,
+        })
+      );
+    } else {
+      res.send(
+        apiResponse({
+          message: "Event not found",
+          error: {
+            message: "Event not found",
+            code: "404",
+          },
+        })
+      );
+    }
+  } catch (error: any) {
+    res.send(
+      apiResponse({
+        message: "Error in searching event",
+        error: {
+          message: error.message,
+          code: "500",
+        },
+      })
+    );
+  }
+});
+
+//Update event by id
+app.patch("/updateEvent/:id", async (req, res) => {
+  try {
+    const event = await EventSchema.updateOne({
+      id: req.params.id,
+    }, req.body);
+    if (event) {
+      res.send(
+        apiResponse({
+          message: "Event Updated successfully",
+          event: event,
         })
       );
     } else {
