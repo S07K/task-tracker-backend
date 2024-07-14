@@ -354,7 +354,6 @@ const sendVerificationEmail = async (
       `${currenURL}/users/verify/${_id}/${uniqueString}`
     ),
   };
-  // console.log("mail options: ", mailOptions);
 
   // hash the unique string and save it to the database
   const saltRounds = 10;
@@ -368,8 +367,6 @@ const sendVerificationEmail = async (
         expiresAt: Date.now() + 24 * 60 * 60 * 1000,
       });
       newUserVerification.save().then(async () => {
-        // console.log("GMAIL_ID", GMAIL_ID);
-        // console.log("GMAIL_PASSWORD", GMAIL_PASSWORD);
         // transporter
         const transporter = nodemailer.createTransport({
           service: "Gmail",
@@ -386,7 +383,7 @@ const sendVerificationEmail = async (
         await transporter.sendMail(mailOptions).then(() => {
           res.send(
             apiResponse({
-              message: "Verification email sent to your email address. Please verify your email address to login",
+              message: "Registration successful! Email verification mail has been sent to your email address.",
             }));
         }).catch((error: any) => {
           res.send(

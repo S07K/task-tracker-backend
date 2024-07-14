@@ -2,6 +2,7 @@ import { UserSchema, User } from "../Models/UserModel";
 import { UserVerificationSchema } from "../Models/UserVerification";
 import utils from "./utils";
 const { apiResponse, sendVerificationEmail } = utils;
+const jwt = require("jsonwebtoken");
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -9,19 +10,17 @@ const express = require("express");
 const bcrypt = require("bcrypt");
 const app = express.Router();
 const APP_URL = process.env.APP_URL;
+const JWT_TOKEN_SECRET = process.env.JWT_TOKEN_SECRET;
 
 const ifUserExists = async (parameters: any) => {
   const user = await UserSchema.findOne(parameters);
   if (user) {
-    // console.log('User exists', user);
     return true;
   } else {
-    // console.log('User does not exist');
     return false;
   }
 };
 
-// register user route
 function generateUserId() {
   // Get current timestamp in milliseconds
   const timestamp = Date.now();
@@ -34,6 +33,7 @@ function generateUserId() {
 
   return userId;
 }
+// register user route
 app.post("/registerUser", async (req: any, res: any) => {
   try {
     if (await ifUserExists({ email: req.body.email })) {
@@ -61,7 +61,7 @@ app.post("/registerUser", async (req: any, res: any) => {
         await sendVerificationEmail(NewUser, res);
       })
       .catch((error: any) => {
-        console.log("Error in adding user", error);
+        console.error("Error in adding user", error);
       });
   } catch (error: any) {
     res.send(
@@ -76,58 +76,152 @@ app.post("/registerUser", async (req: any, res: any) => {
   }
 });
 
+const getTemplate = (template: any) => {
+  const verifiedEmailPageTemplate = `
+  <div
+        style="
+          height: 100vh;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          font-family: 'Lucida Sans', sans-serif;
+          box-shadow: 0 0 4px 4px #efefef;
+        "
+      >
+        <div
+          style="
+            width: 50%;
+            max-width: 500px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            border-radius: 10px;
+          "
+        >
+          <div
+            style="
+              display: flex;
+              justify-content: center;
+              width: 100%;
+              padding: 10px;
+              border-radius: 10px 10px 0 0;
+              background-color: #1e1e1e;
+              color: #fff;
+              font-size: 30px;
+              font-weight: 600;
+              letter-spacing: 2px;
+            "
+          >
+            <p style="margin: 10px 0">Task tracker</p>
+          </div>
+          ${template}
+        </div>
+      </div>
+  `;
+
+  return verifiedEmailPageTemplate;
+};
+
 // verify user route
 app.get("/verify/:id/:uniqueString", async (req: any, res: any) => {
   try {
     const { id, uniqueString } = req.params;
     UserVerificationSchema.findOne({ id })
       .then((result: any) => {
-        // console.log("Verification user", result);
         if (result.id) {
-          // console.log("User exists", result);
           const expiresAt = result.expiresAt;
           const hashedUniqueString = result.uniqueString;
-          // console.log("Expires at", expiresAt);
 
           if (expiresAt < new Date()) {
             UserVerificationSchema.deleteOne({ id })
               .then(() => {
                 console.log("Verification link deleted");
+                UserSchema.deleteOne({ _id: id })
+                  .then(() => {
+                    const template = `<div
+                                        style="
+                                          width: 100%;
+                                          padding: 10px;
+                                          background-color: #efefef;
+                                          color: #1e7e34;
+                                          border-radius: 0 0 10px 10px;
+                                        "
+                                      >
+                                        <div style="text-align: center">
+                                          <p style="font-size: 20px">Verification link has expired.</p>
+                                          <p style="margin-top: 20px">
+                                            <a
+                                              href="${APP_URL}/register"
+                                              style="color: #333; text-decoration: none"
+                                              onmouseover="this.style.color='#1e7e34';"
+                                              onmouseout="this.style.color='#333';"
+                                            >
+                                              Go to registration page &rarr;
+                                            </a>
+                                          </p>
+                                        </div>
+                                      </div>`;
+                    res.send(getTemplate(template));
+                  })
+                  .catch((error: any) => {
+                    console.error(
+                      "Error in deleting user with expired unique string",
+                      error
+                    );
+                  });
               })
               .catch((error: any) => {
-                console.log(
+                console.error(
                   "Error in deleting verification instance with expired unique string",
                   error
                 );
               });
-            res.send(
-              `<h1>Verification link has expired. Please <a href="${APP_URL}/register"></a> again</h1>`
-            );
           } else {
             bcrypt
               .compare(uniqueString, hashedUniqueString)
               .then(async (result: any) => {
                 if (result) {
-                  // console.log("User verified", result);
                   UserSchema.updateOne({ _id: id }, { verified: true })
                     .then((result: any) => {
                       console.log("User verification status updated", result);
                       UserVerificationSchema.deleteOne({ id })
                         .then(() => {
                           console.log("Verification link deleted");
-                          res.send(
-                            `<h1>Verification Completed. Please login <a href="${APP_URL}/login">here</a></h1>`
-                          );
+                          const template = `<div
+                                              style="
+                                                width: 100%;
+                                                padding: 10px;
+                                                background-color: #efefef;
+                                                color: #1e7e34;
+                                                border-radius: 0 0 10px 10px;
+                                              "
+                                            >
+                                              <div style="text-align: center">
+                                                <p style="font-size: 20px">Email verified successfully</p>
+                                                <p style="margin-top: 20px">
+                                                  <a
+                                                    href="${APP_URL}/login"
+                                                    style="color: #333; text-decoration: none"
+                                                    onmouseover="this.style.color='#1e7e34';"
+                                                    onmouseout="this.style.color='#333';"
+                                                  >
+                                                    Go to login page &rarr;
+                                                  </a>
+                                                </p>
+                                              </div>
+                                            </div>`;
+                          res.send(getTemplate(template));
                         })
                         .catch((error: any) => {
-                          console.log(
+                          console.error(
                             "Error in deleting verification link",
                             error
                           );
                         });
                     })
                     .catch((error: any) => {
-                      console.log(
+                      console.error(
                         "Error in updating user verification status",
                         error
                       );
@@ -137,7 +231,7 @@ app.get("/verify/:id/:uniqueString", async (req: any, res: any) => {
                 }
               })
               .catch((error: any) => {
-                console.log("Error in comparing unique strings", error);
+                console.error("Error in comparing unique strings", error);
               });
           }
         } else {
@@ -150,171 +244,63 @@ app.get("/verify/:id/:uniqueString", async (req: any, res: any) => {
   } catch (error: any) {}
 });
 
-// get all Users route
-app.get("/getAllUsers", async (req: any, res: any) => {
+// login user route
+const generateToken = (user: any) => {
   try {
-    const AllUsers: User[] = await UserSchema.find();
-
-    res.send(
-      apiResponse({
-        message: "All users fetched successfully",
-        users: AllUsers,
-      })
+    return jwt.sign(
+      { id: user._id.toString(), email: user.email },
+      JWT_TOKEN_SECRET,
+      { expiresIn: "1h" }
     );
-  } catch (error: any) {
-    res.send(
-      apiResponse({
-        message: "Error in fetching users",
-        error: {
-          message: error.message,
-          code: "500",
-        },
-      })
-    );
+  } catch (error) {
+    console.error("Error in generating token", error);
   }
-});
-
-// delete user route
-app.delete("/deleteUser/:id", async (req: any, res: any) => {
-  try {
-    if (await ifUserExists(req.params.id)) {
-      await UserSchema.deleteOne({
-        id: req.params.id,
-      });
-      const allUsers = await UserSchema.find();
-      res.send(
-        apiResponse({
-          message: "User deleted successfully",
-          users: allUsers,
-        })
-      );
-    } else {
-      res.send(
-        apiResponse({
-          message: "User does not exist",
-          error: {
-            message: "User does not exist",
-            code: "404",
-          },
-        })
-      );
-    }
-  } catch (error: any) {
-    res.send(
-      apiResponse({
-        message: "Error in deleting user",
-        error: {
-          message: error.message,
-          code: "500",
-        },
-      })
-    );
-  }
-});
-
-//search user by id
-app.get("/searchUser/:id", async (req: any, res: any) => {
+};
+app.post("/login", async (req: any, res: any) => {
   try {
     const user = await UserSchema.findOne({
-      id: req.params.id,
+      email: req.body.email,
+      password: req.body.password,
     });
     if (user) {
-      res.send(
-        apiResponse({
-          message: "User found",
-          user: user,
-        })
-      );
+      if (user.verified) {
+        const token = await generateToken(user);
+        if (token) {
+          res.status(200).json({
+            message: "User logged in successfully",
+            token: token || null,
+            userId: user._id.toString(),
+          });
+        } else {
+          throw { message: "Can't login user at the moment", code: "500" };
+        }
+      } else {
+        res.send(
+          apiResponse({
+            message: "not verified",
+            error: {
+              message: "User not verified",
+              code: "401",
+            },
+          })
+        );
+      }
     } else {
       res.send(
         apiResponse({
           message: "User not found",
           error: {
             message: "User not found",
-            code: "404",
+            code: "401",
           },
         })
       );
     }
   } catch (error: any) {
+    console.error("Error in logging in user", error);
     res.send(
       apiResponse({
-        message: "Error in searching user",
-        error: {
-          message: error.message,
-          code: "500",
-        },
-      })
-    );
-  }
-});
-
-//Update user by id
-app.patch("/updateUser/:id", async (req: any, res: any) => {
-  try {
-    const user = await UserSchema.updateOne(
-      {
-        id: req.params.id,
-      },
-      req.body
-    );
-    if (user) {
-      res.send(
-        apiResponse({
-          message: "User Updated successfully",
-          user: user,
-        })
-      );
-    } else {
-      res.send(
-        apiResponse({
-          message: "User not found",
-          error: {
-            message: "User not found",
-            code: "404",
-          },
-        })
-      );
-    }
-  } catch (error: any) {
-    res.send(
-      apiResponse({
-        message: "Error in searching user",
-        error: {
-          message: error.message,
-          code: "500",
-        },
-      })
-    );
-  }
-});
-
-// search user
-app.post("/searchUser/", async (req: any, res: any) => {
-  try {
-    const users = await UserSchema.find(req.body);
-    if (users) {
-      res.send(
-        apiResponse({
-          message: "Users found",
-          users: users,
-        })
-      );
-    } else {
-      res.send(
-        apiResponse({
-          message: "Users not found",
-          error: {
-            message: "Users not found",
-            code: "404",
-          },
-        })
-      );
-    }
-  } catch (error: any) {
-    res.send(
-      apiResponse({
-        message: "Error in searching users",
+        message: "Error in logging in user",
         error: {
           message: error.message,
           code: "500",

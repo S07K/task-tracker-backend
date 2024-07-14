@@ -7,6 +7,7 @@ dotenv.config();
 const mongoose = require("mongoose");
 const MONGODB_URL = process.env.MONGODB_URL;
 const APP_URL = process.env.APP_URL;
+const PORT = process.env.PORT;
 const app = express();
 
 function logger(req: Request, res: Response, next: NextFunction) {
@@ -21,7 +22,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 //mongo db connection
-main().catch((err) => console.log("Error in MongoDB connection", err));
+main().catch((err) => console.error("Error in MongoDB connection", err));
 
 async function main() {
   await mongoose.connect(MONGODB_URL);
@@ -40,6 +41,6 @@ app.get("/", async (req: any, res: any) => {
 app.use("/events", eventRouter);
 app.use("/users", userRouter);
 
-app.listen(5001, () => {
+app.listen(PORT, () => {
   console.log("Server listening on port 5001");
 });

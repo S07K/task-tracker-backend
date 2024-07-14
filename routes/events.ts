@@ -1,5 +1,6 @@
 import { EventSchema, Event } from "../Models/EventModel";
 import utils from "./utils";
+const authMiddleware = require("../middleware/auth");
 const { apiResponse } = utils;
 
 const express = require("express");
@@ -10,13 +11,13 @@ const ifEventExists = async (id: string) => {
     id: id,
   });
   if (event) {
-    // console.log('Event exists', event);
     return true;
   } else {
-    // console.log('Event does not exist');
     return false;
   }
 };
+
+app.use(authMiddleware);
 
 // add event route
 function generateEventId() {
@@ -33,7 +34,7 @@ function generateEventId() {
   }
   app.post("/addEvent", async (req: any, res: any) => {
     try {
-      if (await ifEventExists(req.body.id)) {
+      if (await ifEventExists(req.user.id)) {
         res.send(
           apiResponse({
             message: "Event already exists",
@@ -47,7 +48,7 @@ function generateEventId() {
       }
       const NewEvent = new EventSchema({
         id: generateEventId(),
-        // groupId: req.body.groupId || "1",
+        groupId: req.body.id || "1",
         allDay: req.body.allDay || false,
         start: req.body.start,
         end: req.body.end,
@@ -92,7 +93,7 @@ function generateEventId() {
   // get all Events route
   app.get("/getAllEvents", async (req: any, res: any) => {
     try {
-      const AllEvents: Event[] = await EventSchema.find();
+      const AllEvents: Event[] = await EventSchema.find({groupId: req.user.id});
   
       res.send(
         apiResponse({
