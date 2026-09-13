@@ -3,17 +3,14 @@
 import dotenv from "dotenv";
 import { UserSchema } from "../Models/UserModel";
 import { hashPassword, isBcryptHash } from "../routes/passwords";
+import { buildMongoUrl } from "../config/mongo";
 dotenv.config();
 
 const mongoose = require("mongoose");
-const MONGODB_URL = process.env.MONGODB_URL;
 const dryRun = process.argv.includes("--dry-run");
 
 async function main() {
-  if (!MONGODB_URL) {
-    throw new Error("MONGODB_URL is not set");
-  }
-  await mongoose.connect(MONGODB_URL);
+  await mongoose.connect(buildMongoUrl());
 
   const users = await UserSchema.find({}, { _id: 1, password: 1 });
   const plaintext = users.filter((user: any) => !isBcryptHash(user.password));

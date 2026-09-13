@@ -17,9 +17,9 @@ const cors_1 = __importDefault(require("cors"));
 const events_1 = __importDefault(require("./routes/events"));
 const users_1 = __importDefault(require("./routes/users"));
 const dotenv_1 = __importDefault(require("dotenv"));
+const mongo_1 = require("./config/mongo");
 dotenv_1.default.config();
 const mongoose = require("mongoose");
-const MONGODB_URL = process.env.MONGODB_URL;
 const APP_URL = process.env.APP_URL;
 const PORT = process.env.PORT;
 const app = (0, express_1.default)();
@@ -35,9 +35,9 @@ app.use(express_1.default.urlencoded({ extended: true }));
 main().catch((err) => console.error("Error in MongoDB connection", err));
 function main() {
     return __awaiter(this, void 0, void 0, function* () {
-        yield mongoose.connect(MONGODB_URL);
+        // Credentials from MONGODB_USERNAME / MONGODB_PASSWORD are URL-encoded into MONGODB_URL
+        yield mongoose.connect((0, mongo_1.buildMongoUrl)());
         console.log("DB connected!");
-        // use `await mongoose.connect('mongodb://user:password@127.0.0.1:27017/test');` if your database has auth enabled
     });
 }
 // api routes

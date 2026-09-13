@@ -17,16 +17,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const dotenv_1 = __importDefault(require("dotenv"));
 const UserModel_1 = require("../Models/UserModel");
 const passwords_1 = require("../routes/passwords");
+const mongo_1 = require("../config/mongo");
 dotenv_1.default.config();
 const mongoose = require("mongoose");
-const MONGODB_URL = process.env.MONGODB_URL;
 const dryRun = process.argv.includes("--dry-run");
 function main() {
     return __awaiter(this, void 0, void 0, function* () {
-        if (!MONGODB_URL) {
-            throw new Error("MONGODB_URL is not set");
-        }
-        yield mongoose.connect(MONGODB_URL);
+        yield mongoose.connect((0, mongo_1.buildMongoUrl)());
         const users = yield UserModel_1.UserSchema.find({}, { _id: 1, password: 1 });
         const plaintext = users.filter((user) => !(0, passwords_1.isBcryptHash)(user.password));
         console.log(`${users.length} users, ${plaintext.length} with plain-text passwords`);

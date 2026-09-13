@@ -54,7 +54,8 @@ app.post("/addEvent", (req, res) => __awaiter(void 0, void 0, void 0, function* 
         }
         const NewEvent = new EventModel_1.EventSchema({
             id: generateEventId(),
-            groupId: req.body.id || "1",
+            // The owner always comes from the verified token, never the request body.
+            groupId: req.user.id,
             allDay: req.body.allDay || false,
             start: req.body.start,
             end: req.body.end,
@@ -111,20 +112,22 @@ app.get("/getAllEvents", (req, res) => __awaiter(void 0, void 0, void 0, functio
         }));
     }
 }));
-// delete event route
+// delete event route (only the signed-in user's own events)
 app.delete("/deleteEvent/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        if (yield ifEventExists(req.params.id)) {
-            yield EventModel_1.EventSchema.deleteOne({
-                id: req.params.id,
-            });
-            const allEvents = yield EventModel_1.EventSchema.find();
+        const result = yield EventModel_1.EventSchema.deleteOne({
+            id: req.params.id,
+            groupId: req.user.id,
+        });
+        if (result.deletedCount > 0) {
+            const userEvents = yield EventModel_1.EventSchema.find({ groupId: req.user.id });
             res.send(apiResponse({
                 message: "Event deleted successfully",
-                events: allEvents,
+                events: userEvents,
             }));
         }
         else {
+            // Same response for missing and not-owned events, so IDs can't be probed.
             res.send(apiResponse({
                 message: "Event does not exist",
                 error: {
@@ -144,11 +147,12 @@ app.delete("/deleteEvent/:id", (req, res) => __awaiter(void 0, void 0, void 0, f
         }));
     }
 }));
-//search event by id
+//search event by id (only the signed-in user's own events)
 app.get("/searchEvent/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const event = yield EventModel_1.EventSchema.findOne({
             id: req.params.id,
+            groupId: req.user.id,
         });
         if (event) {
             res.send(apiResponse({
@@ -176,12 +180,28 @@ app.get("/searchEvent/:id", (req, res) => __awaiter(void 0, void 0, void 0, func
         }));
     }
 }));
-//Update event by id
+// fields a client may change on its own event (never id or groupId)
+const UPDATABLE_FIELDS = [
+    "title",
+    "allDay",
+    "start",
+    "end",
+    "startStr",
+    "endStr",
+    "url",
+    "backgroundColor",
+    "borderColor",
+    "textColor",
+];
+//Update event by id (only the signed-in user's own events)
 app.patch("/updateEvent/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const event = yield EventModel_1.EventSchema.updateOne({
-            id: req.params.id,
-        }, req.body);
+        const updates = {};
+        UPDATABLE_FIELDS.forEach((field) => {
+            if (req.body[field] !== undefined)
+                updates[field] = req.body[field];
+        });
+        const event = yield EventModel_1.EventSchema.findOneAndUpdate({ id: req.params.id, groupId: req.user.id }, { $set: updates }, { new: true });
         if (event) {
             res.send(apiResponse({
                 message: "Event Updated successfully",
@@ -189,6 +209,7 @@ app.patch("/updateEvent/:id", (req, res) => __awaiter(void 0, void 0, void 0, fu
             }));
         }
         else {
+            // Same response for missing and not-owned events, so IDs can't be probed.
             res.send(apiResponse({
                 message: "Event not found",
                 error: {
@@ -208,10 +229,23 @@ app.patch("/updateEvent/:id", (req, res) => __awaiter(void 0, void 0, void 0, fu
         }));
     }
 }));
-// search event
+// fields events can be searched by
+const SEARCHABLE_FIELDS = ["id", "title", "allDay", "startStr", "endStr", "backgroundColor"];
+// search event (only the signed-in user's own events)
 app.post("/searchEvent/", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const events = yield EventModel_1.EventSchema.find(req.body);
+        // Build the filter from plain values only, so query operators like $ne or $where
+        // in the body can't widen the search, and always scope it to the user.
+        const filter = {};
+        SEARCHABLE_FIELDS.forEach((field) => {
+            var _a;
+            const value = (_a = req.body) === null || _a === void 0 ? void 0 : _a[field];
+            if (["string", "number", "boolean"].includes(typeof value)) {
+                filter[field] = value;
+            }
+        });
+        filter.groupId = req.user.id;
+        const events = yield EventModel_1.EventSchema.find(filter);
         if (events) {
             res.send(apiResponse({
                 message: "Events found",

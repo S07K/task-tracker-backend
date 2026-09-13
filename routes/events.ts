@@ -48,7 +48,8 @@ function generateEventId() {
       }
       const NewEvent = new EventSchema({
         id: generateEventId(),
-        groupId: req.body.id || "1",
+        // The owner always comes from the verified token, never the request body.
+        groupId: req.user.id,
         allDay: req.body.allDay || false,
         start: req.body.start,
         end: req.body.end,
@@ -114,21 +115,23 @@ function generateEventId() {
     }
   });
   
-  // delete event route
+  // delete event route (only the signed-in user's own events)
   app.delete("/deleteEvent/:id", async (req: any, res: any) => {
     try {
-      if (await ifEventExists(req.params.id)) {
-        await EventSchema.deleteOne({
-          id: req.params.id,
-        });
-        const allEvents = await EventSchema.find();
+      const result = await EventSchema.deleteOne({
+        id: req.params.id,
+        groupId: req.user.id,
+      });
+      if (result.deletedCount > 0) {
+        const userEvents = await EventSchema.find({ groupId: req.user.id });
         res.send(
           apiResponse({
             message: "Event deleted successfully",
-            events: allEvents,
+            events: userEvents,
           })
         );
       } else {
+        // Same response for missing and not-owned events, so IDs can't be probed.
         res.send(
           apiResponse({
             message: "Event does not exist",
@@ -152,11 +155,12 @@ function generateEventId() {
     }
   });
   
-  //search event by id
+  //search event by id (only the signed-in user's own events)
   app.get("/searchEvent/:id", async (req: any, res: any) => {
     try {
       const event = await EventSchema.findOne({
         id: req.params.id,
+        groupId: req.user.id,
       });
       if (event) {
         res.send(
@@ -189,12 +193,32 @@ function generateEventId() {
     }
   });
   
-  //Update event by id
+  // fields a client may change on its own event (never id or groupId)
+  const UPDATABLE_FIELDS = [
+    "title",
+    "allDay",
+    "start",
+    "end",
+    "startStr",
+    "endStr",
+    "url",
+    "backgroundColor",
+    "borderColor",
+    "textColor",
+  ];
+
+  //Update event by id (only the signed-in user's own events)
   app.patch("/updateEvent/:id", async (req: any, res: any) => {
     try {
-      const event = await EventSchema.updateOne({
-        id: req.params.id,
-      }, req.body);
+      const updates: Record<string, any> = {};
+      UPDATABLE_FIELDS.forEach((field) => {
+        if (req.body[field] !== undefined) updates[field] = req.body[field];
+      });
+      const event = await EventSchema.findOneAndUpdate(
+        { id: req.params.id, groupId: req.user.id },
+        { $set: updates },
+        { new: true }
+      );
       if (event) {
         res.send(
           apiResponse({
@@ -203,6 +227,7 @@ function generateEventId() {
           })
         );
       } else {
+        // Same response for missing and not-owned events, so IDs can't be probed.
         res.send(
           apiResponse({
             message: "Event not found",
@@ -226,10 +251,23 @@ function generateEventId() {
     }
   });
   
-  // search event
+  // fields events can be searched by
+  const SEARCHABLE_FIELDS = ["id", "title", "allDay", "startStr", "endStr", "backgroundColor"];
+
+  // search event (only the signed-in user's own events)
   app.post("/searchEvent/", async (req: any, res: any) => {
     try {
-      const events = await EventSchema.find(req.body);
+      // Build the filter from plain values only, so query operators like $ne or $where
+      // in the body can't widen the search, and always scope it to the user.
+      const filter: Record<string, string | number | boolean> = {};
+      SEARCHABLE_FIELDS.forEach((field) => {
+        const value = req.body?.[field];
+        if (["string", "number", "boolean"].includes(typeof value)) {
+          filter[field] = value;
+        }
+      });
+      filter.groupId = req.user.id;
+      const events = await EventSchema.find(filter);
       if (events) {
         res.send(
           apiResponse({
