@@ -3,9 +3,9 @@ import cors from "cors";
 import eventRouter from "./routes/events";
 import userRouter from "./routes/users";
 import dotenv from "dotenv";
+import { buildMongoUrl } from "./config/mongo";
 dotenv.config();
 const mongoose = require("mongoose");
-const MONGODB_URL = process.env.MONGODB_URL;
 const APP_URL = process.env.APP_URL;
 const PORT = process.env.PORT;
 const app = express();
@@ -25,9 +25,9 @@ app.use(express.urlencoded({ extended: true }));
 main().catch((err) => console.error("Error in MongoDB connection", err));
 
 async function main() {
-  await mongoose.connect(MONGODB_URL);
+  // Credentials from MONGODB_USERNAME / MONGODB_PASSWORD are URL-encoded into MONGODB_URL
+  await mongoose.connect(buildMongoUrl());
   console.log("DB connected!");
-  // use `await mongoose.connect('mongodb://user:password@127.0.0.1:27017/test');` if your database has auth enabled
 }
 
 // api routes
