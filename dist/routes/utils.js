@@ -16,7 +16,7 @@ const UserVerification_1 = require("../Models/UserVerification");
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
 const nodemailer = require("nodemailer");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const bcrypt = require("bcrypt");
 const SERVER_URL = process.env.SERVER_URL;
 const GMAIL_ID = process.env.GMAIL_ID;
@@ -335,7 +335,7 @@ const EmailVerificationHTMLTemplate = (name, type_of_action, verificationURL) =>
 };
 const sendVerificationEmail = (_a, res_1) => __awaiter(void 0, [_a, res_1], void 0, function* ({ _id, name, email }, res) {
     const currenURL = SERVER_URL;
-    const uniqueString = uuidv4() + _id;
+    const uniqueString = randomUUID() + _id;
     // mail options
     const mailOptions = {
         from: "mr.sk.hello.future@gmail.com",
