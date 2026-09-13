@@ -1,6 +1,7 @@
 import { UserSchema, User } from "../Models/UserModel";
 import { UserVerificationSchema } from "../Models/UserVerification";
 import utils from "./utils";
+import { hashPassword, isBcryptHash, verifyPassword } from "./passwords";
 const { apiResponse, sendVerificationEmail } = utils;
 const authMiddleware = require("../middleware/auth");
 const jwt = require("jsonwebtoken");
@@ -49,11 +50,23 @@ app.post("/registerUser", async (req: any, res: any) => {
       );
       return;
     }
+    if (typeof req.body.password !== "string" || !req.body.password) {
+      res.send(
+        apiResponse({
+          message: "Password is required",
+          error: {
+            message: "Password is required",
+            code: "400",
+          },
+        })
+      );
+      return;
+    }
     const NewUser = new UserSchema({
       id: generateUserId(),
       name: req.body.name,
       email: req.body.email,
-      password: req.body.password,
+      password: await hashPassword(req.body.password),
       verified: false,
     });
     NewUser.save()
@@ -259,11 +272,18 @@ const generateToken = (user: any) => {
 };
 app.post("/login", async (req: any, res: any) => {
   try {
-    const user = await UserSchema.findOne({
-      email: req.body.email,
-      password: req.body.password,
-    });
-    if (user) {
+    const user = await UserSchema.findOne({ email: req.body.email });
+    const passwordMatches = user
+      ? await verifyPassword(req.body.password, user.password)
+      : false;
+    if (user && passwordMatches) {
+      // Upgrade accounts that still hold a plain-text password.
+      if (!isBcryptHash(user.password)) {
+        await UserSchema.updateOne(
+          { _id: user._id },
+          { password: await hashPassword(req.body.password) }
+        );
+      }
       if (user.verified) {
         const token = await generateToken(user);
         if (token) {
@@ -427,8 +447,7 @@ app.patch("/me/password", authMiddleware, async (req: any, res: any) => {
       );
       return;
     }
-    // Passwords are currently stored as-is (see /login), so compare directly.
-    if (user.password !== currentPassword) {
+    if (!(await verifyPassword(currentPassword, user.password))) {
       res.send(
         apiResponse({
           message: "Incorrect password",
@@ -449,7 +468,10 @@ app.patch("/me/password", authMiddleware, async (req: any, res: any) => {
       );
       return;
     }
-    await UserSchema.updateOne({ _id: user._id }, { password: newPassword });
+    await UserSchema.updateOne(
+      { _id: user._id },
+      { password: await hashPassword(newPassword) }
+    );
     res.status(200).json({ message: "Password updated successfully" });
   } catch (error: any) {
     res.send(

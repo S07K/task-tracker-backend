@@ -15,6 +15,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const UserModel_1 = require("../Models/UserModel");
 const UserVerification_1 = require("../Models/UserVerification");
 const utils_1 = __importDefault(require("./utils"));
+const passwords_1 = require("./passwords");
 const { apiResponse, sendVerificationEmail } = utils_1.default;
 const authMiddleware = require("../middleware/auth");
 const jwt = require("jsonwebtoken");
@@ -56,11 +57,21 @@ app.post("/registerUser", (req, res) => __awaiter(void 0, void 0, void 0, functi
             }));
             return;
         }
+        if (typeof req.body.password !== "string" || !req.body.password) {
+            res.send(apiResponse({
+                message: "Password is required",
+                error: {
+                    message: "Password is required",
+                    code: "400",
+                },
+            }));
+            return;
+        }
         const NewUser = new UserModel_1.UserSchema({
             id: generateUserId(),
             name: req.body.name,
             email: req.body.email,
-            password: req.body.password,
+            password: yield (0, passwords_1.hashPassword)(req.body.password),
             verified: false,
         });
         NewUser.save()
@@ -249,11 +260,15 @@ const generateToken = (user) => {
 };
 app.post("/login", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const user = yield UserModel_1.UserSchema.findOne({
-            email: req.body.email,
-            password: req.body.password,
-        });
-        if (user) {
+        const user = yield UserModel_1.UserSchema.findOne({ email: req.body.email });
+        const passwordMatches = user
+            ? yield (0, passwords_1.verifyPassword)(req.body.password, user.password)
+            : false;
+        if (user && passwordMatches) {
+            // Upgrade accounts that still hold a plain-text password.
+            if (!(0, passwords_1.isBcryptHash)(user.password)) {
+                yield UserModel_1.UserSchema.updateOne({ _id: user._id }, { password: yield (0, passwords_1.hashPassword)(req.body.password) });
+            }
             if (user.verified) {
                 const token = yield generateToken(user);
                 if (token) {
@@ -392,8 +407,7 @@ app.patch("/me/password", authMiddleware, (req, res) => __awaiter(void 0, void 0
             }));
             return;
         }
-        // Passwords are currently stored as-is (see /login), so compare directly.
-        if (user.password !== currentPassword) {
+        if (!(yield (0, passwords_1.verifyPassword)(currentPassword, user.password))) {
             res.send(apiResponse({
                 message: "Incorrect password",
                 error: { message: "Current password is incorrect", code: "401" },
@@ -410,7 +424,7 @@ app.patch("/me/password", authMiddleware, (req, res) => __awaiter(void 0, void 0
             }));
             return;
         }
-        yield UserModel_1.UserSchema.updateOne({ _id: user._id }, { password: newPassword });
+        yield UserModel_1.UserSchema.updateOne({ _id: user._id }, { password: yield (0, passwords_1.hashPassword)(newPassword) });
         res.status(200).json({ message: "Password updated successfully" });
     }
     catch (error) {
