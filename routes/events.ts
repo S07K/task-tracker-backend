@@ -48,7 +48,8 @@ function generateEventId() {
       }
       const NewEvent = new EventSchema({
         id: generateEventId(),
-        groupId: req.body.id || "1",
+        // The owner always comes from the verified token, never the request body.
+        groupId: req.user.id,
         allDay: req.body.allDay || false,
         start: req.body.start,
         end: req.body.end,
@@ -154,11 +155,12 @@ function generateEventId() {
     }
   });
   
-  //search event by id
+  //search event by id (only the signed-in user's own events)
   app.get("/searchEvent/:id", async (req: any, res: any) => {
     try {
       const event = await EventSchema.findOne({
         id: req.params.id,
+        groupId: req.user.id,
       });
       if (event) {
         res.send(
@@ -249,10 +251,23 @@ function generateEventId() {
     }
   });
   
-  // search event
+  // fields events can be searched by
+  const SEARCHABLE_FIELDS = ["id", "title", "allDay", "startStr", "endStr", "backgroundColor"];
+
+  // search event (only the signed-in user's own events)
   app.post("/searchEvent/", async (req: any, res: any) => {
     try {
-      const events = await EventSchema.find(req.body);
+      // Build the filter from plain values only, so query operators like $ne or $where
+      // in the body can't widen the search, and always scope it to the user.
+      const filter: Record<string, string | number | boolean> = {};
+      SEARCHABLE_FIELDS.forEach((field) => {
+        const value = req.body?.[field];
+        if (["string", "number", "boolean"].includes(typeof value)) {
+          filter[field] = value;
+        }
+      });
+      filter.groupId = req.user.id;
+      const events = await EventSchema.find(filter);
       if (events) {
         res.send(
           apiResponse({
