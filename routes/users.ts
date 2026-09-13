@@ -2,6 +2,7 @@ import { UserSchema, User } from "../Models/UserModel";
 import { UserVerificationSchema } from "../Models/UserVerification";
 import utils from "./utils";
 const { apiResponse, sendVerificationEmail } = utils;
+const authMiddleware = require("../middleware/auth");
 const jwt = require("jsonwebtoken");
 import dotenv from "dotenv";
 dotenv.config();
@@ -305,6 +306,156 @@ app.post("/login", async (req: any, res: any) => {
           message: error.message,
           code: "500",
         },
+      })
+    );
+  }
+});
+
+// account routes (authenticated)
+const MIN_PASSWORD_LENGTH = 8;
+
+const toPublicUser = (user: any) => ({
+  id: user._id.toString(),
+  name: user.name,
+  email: user.email,
+  verified: user.verified,
+});
+
+// get current user's account details
+app.get("/me", authMiddleware, async (req: any, res: any) => {
+  try {
+    const user = await UserSchema.findById(req.user.id);
+    if (!user) {
+      res.send(
+        apiResponse({
+          message: "User not found",
+          error: { message: "User not found", code: "404" },
+        })
+      );
+      return;
+    }
+    res.status(200).json({
+      message: "User fetched successfully",
+      user: toPublicUser(user),
+    });
+  } catch (error: any) {
+    res.send(
+      apiResponse({
+        message: "Error in fetching user",
+        error: { message: error.message, code: "500" },
+      })
+    );
+  }
+});
+
+// update current user's profile details
+app.patch("/me", authMiddleware, async (req: any, res: any) => {
+  try {
+    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+    if (!name || name.length > 100) {
+      res.send(
+        apiResponse({
+          message: "Invalid name",
+          error: {
+            message: "Name is required and must be 100 characters or fewer",
+            code: "400",
+          },
+        })
+      );
+      return;
+    }
+    const user = await UserSchema.findByIdAndUpdate(
+      req.user.id,
+      { name },
+      { new: true }
+    );
+    if (!user) {
+      res.send(
+        apiResponse({
+          message: "User not found",
+          error: { message: "User not found", code: "404" },
+        })
+      );
+      return;
+    }
+    res.status(200).json({
+      message: "User updated successfully",
+      user: toPublicUser(user),
+    });
+  } catch (error: any) {
+    res.send(
+      apiResponse({
+        message: "Error in updating user",
+        error: { message: error.message, code: "500" },
+      })
+    );
+  }
+});
+
+// change current user's password
+app.patch("/me/password", authMiddleware, async (req: any, res: any) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (typeof currentPassword !== "string" || typeof newPassword !== "string" || !currentPassword) {
+      res.send(
+        apiResponse({
+          message: "Invalid password details",
+          error: { message: "Current and new password are required", code: "400" },
+        })
+      );
+      return;
+    }
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      res.send(
+        apiResponse({
+          message: "Invalid new password",
+          error: {
+            message: `New password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+            code: "400",
+          },
+        })
+      );
+      return;
+    }
+    const user = await UserSchema.findById(req.user.id);
+    if (!user) {
+      res.send(
+        apiResponse({
+          message: "User not found",
+          error: { message: "User not found", code: "404" },
+        })
+      );
+      return;
+    }
+    // Passwords are currently stored as-is (see /login), so compare directly.
+    if (user.password !== currentPassword) {
+      res.send(
+        apiResponse({
+          message: "Incorrect password",
+          error: { message: "Current password is incorrect", code: "401" },
+        })
+      );
+      return;
+    }
+    if (newPassword === currentPassword) {
+      res.send(
+        apiResponse({
+          message: "Invalid new password",
+          error: {
+            message: "New password must be different from the current one",
+            code: "400",
+          },
+        })
+      );
+      return;
+    }
+    await UserSchema.updateOne({ _id: user._id }, { password: newPassword });
+    res.status(200).json({ message: "Password updated successfully" });
+  } catch (error: any) {
+    res.send(
+      apiResponse({
+        message: "Error in updating password",
+        error: { message: error.message, code: "500" },
       })
     );
   }
