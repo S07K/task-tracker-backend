@@ -3,7 +3,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const nodemailer = require("nodemailer");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const bcrypt = require("bcrypt");
 const SERVER_URL = process.env.SERVER_URL;
 const GMAIL_ID = process.env.GMAIL_ID;
@@ -341,7 +341,7 @@ const sendVerificationEmail = async (
   res: any
 ) => {
   const currenURL = SERVER_URL;
-  const uniqueString = uuidv4() + _id;
+  const uniqueString = randomUUID() + _id;
 
   // mail options
   const mailOptions = {
