@@ -111,20 +111,22 @@ app.get("/getAllEvents", (req, res) => __awaiter(void 0, void 0, void 0, functio
         }));
     }
 }));
-// delete event route
+// delete event route (only the signed-in user's own events)
 app.delete("/deleteEvent/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        if (yield ifEventExists(req.params.id)) {
-            yield EventModel_1.EventSchema.deleteOne({
-                id: req.params.id,
-            });
-            const allEvents = yield EventModel_1.EventSchema.find();
+        const result = yield EventModel_1.EventSchema.deleteOne({
+            id: req.params.id,
+            groupId: req.user.id,
+        });
+        if (result.deletedCount > 0) {
+            const userEvents = yield EventModel_1.EventSchema.find({ groupId: req.user.id });
             res.send(apiResponse({
                 message: "Event deleted successfully",
-                events: allEvents,
+                events: userEvents,
             }));
         }
         else {
+            // Same response for missing and not-owned events, so IDs can't be probed.
             res.send(apiResponse({
                 message: "Event does not exist",
                 error: {
@@ -176,12 +178,28 @@ app.get("/searchEvent/:id", (req, res) => __awaiter(void 0, void 0, void 0, func
         }));
     }
 }));
-//Update event by id
+// fields a client may change on its own event (never id or groupId)
+const UPDATABLE_FIELDS = [
+    "title",
+    "allDay",
+    "start",
+    "end",
+    "startStr",
+    "endStr",
+    "url",
+    "backgroundColor",
+    "borderColor",
+    "textColor",
+];
+//Update event by id (only the signed-in user's own events)
 app.patch("/updateEvent/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const event = yield EventModel_1.EventSchema.updateOne({
-            id: req.params.id,
-        }, req.body);
+        const updates = {};
+        UPDATABLE_FIELDS.forEach((field) => {
+            if (req.body[field] !== undefined)
+                updates[field] = req.body[field];
+        });
+        const event = yield EventModel_1.EventSchema.findOneAndUpdate({ id: req.params.id, groupId: req.user.id }, { $set: updates }, { new: true });
         if (event) {
             res.send(apiResponse({
                 message: "Event Updated successfully",
@@ -189,6 +207,7 @@ app.patch("/updateEvent/:id", (req, res) => __awaiter(void 0, void 0, void 0, fu
             }));
         }
         else {
+            // Same response for missing and not-owned events, so IDs can't be probed.
             res.send(apiResponse({
                 message: "Event not found",
                 error: {
