@@ -1,21 +1,23 @@
-import type Groq from "groq-sdk";
+import type OpenAI from "openai";
 import type {
+  ChatCompletionFunctionTool,
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
-  ChatCompletionTool,
-} from "groq-sdk/resources/chat/completions";
+} from "openai/resources/chat/completions";
 import {
   TaskInputError,
   TaskView,
   createTask,
   dayOfWeek,
+  describeDates,
   findTasksForDeletion,
   listTasks,
   updateTask,
 } from "./tasks";
 
 // Limits keep each chat request small: Groq's free tier allows ~8K tokens/minute
-// per organization, shared by every user of the app.
+// per organization, shared by every user of the app, and small local models
+// work best with short contexts.
 export const MAX_HISTORY_MESSAGES = 12;
 export const MAX_MESSAGE_CHARS = 2000;
 const MAX_TOOL_ROUNDS = 5;
@@ -39,7 +41,7 @@ export interface AssistantResult {
   changed: boolean;
 }
 
-const TOOLS: ChatCompletionTool[] = [
+const TOOLS: ChatCompletionFunctionTool[] = [
   {
     type: "function",
     function: {
@@ -126,16 +128,21 @@ function buildSystemPrompt(now: string, timeZone: string): string {
   return [
     "You are the Task Tracker assistant. You help the signed-in user manage the tasks on their calendar using the provided tools.",
     "",
-    "Rules:",
-    "- Use tools to read or change tasks. Never invent task ids: call list_tasks to find them.",
-    "- Timed tasks use YYYY-MM-DDTHH:mm (24-hour); all-day tasks use YYYY-MM-DD. If no duration is given, timed tasks last 30 minutes.",
+    "Using the tools:",
+    "- To answer questions about the schedule, call list_tasks.",
+    "- To change, move or delete an existing task, first call list_tasks to find its id, then call update_task or delete_tasks with that id. Never create a new task to move an existing one, and never invent ids.",
+    "- In tool arguments, always write dates as YYYY-MM-DD and times as YYYY-MM-DDTHH:mm (24-hour), for example 2026-09-15T14:00. Use the date list below to turn words like \"tomorrow\" or \"Friday\" into dates.",
+    "- If no duration is given, timed tasks last 30 minutes.",
+    '- Task titles are short and never include the date or time ("Gym", not "Gym tomorrow at 7am").',
     "- delete_tasks does not delete anything. After calling it, tell the user to press Confirm to delete.",
+    "- If a tool returns an error, fix the arguments and call the tool again instead of asking the user about formats.",
     "- If a request is ambiguous (for example several tasks match), ask a short question instead of guessing.",
-    "- If a tool returns an error, fix the arguments and retry, or explain the problem to the user.",
     "- Only help with the user's tasks and schedule. Politely decline anything else.",
-    "- Keep replies short and friendly. Write times like 3:30pm and dates like Mon, Sep 14. Never show task ids.",
     "",
-    `Current local date and time: ${now} (${dayOfWeek(now)}), time zone ${timeZone}. Resolve relative dates such as "tomorrow" or "next Friday" from this.`,
+    "Replying to the user: keep it short and friendly, write times like 3:30pm and dates like Tue, Sep 15, and never show task ids.",
+    "",
+    `Now: ${now} (${dayOfWeek(now)}), time zone ${timeZone}.`,
+    `Dates: ${describeDates(now)}`,
   ].join("\n");
 }
 
@@ -162,6 +169,10 @@ interface ToolState {
 }
 
 async function runTool(call: ChatCompletionMessageToolCall, state: ToolState): Promise<unknown> {
+  if (call.type !== "function") {
+    return { error: "Unsupported tool call type; use the provided functions" };
+  }
+
   let args: unknown;
   try {
     args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
@@ -203,19 +214,31 @@ async function runTool(call: ChatCompletionMessageToolCall, state: ToolState): P
 }
 
 export async function runAssistant(options: {
-  client: Groq;
+  client: OpenAI;
   model: string;
   userId: string;
   history: ChatTurn[];
   now: string;
   timeZone: string;
+  temperature?: number;
 }): Promise<AssistantResult> {
-  const { client, model, userId, history, now, timeZone } = options;
+  const { client, model, userId, history, now, timeZone, temperature } = options;
   const state: ToolState = { userId, actions: [], pendingDeletes: new Map() };
   const messages: ChatCompletionMessageParam[] = [
     { role: "system", content: buildSystemPrompt(now, timeZone) },
     ...history,
   ];
+
+  // Short description of what changed, for when the model ends without a reply
+  // (small local models sometimes do) or runs out of steps.
+  const summarizeChanges = (): string => {
+    const parts = state.actions.map((action) => `${action.type === "created" ? "Created" : "Updated"} "${action.task.title}".`);
+    const pending = Array.from(state.pendingDeletes.values());
+    if (pending.length) {
+      parts.push(`Press Confirm to delete ${pending.length === 1 ? `"${pending[0].title}"` : `${pending.length} tasks`}.`);
+    }
+    return parts.join(" ");
+  };
 
   const result = (reply: string): AssistantResult => ({
     reply,
@@ -231,7 +254,8 @@ export async function runAssistant(options: {
       tools: TOOLS,
       tool_choice: "auto",
       max_completion_tokens: MAX_COMPLETION_TOKENS,
-      // gpt-oss models reason before answering; low effort keeps token use down.
+      ...(temperature !== undefined ? { temperature } : {}),
+      // gpt-oss models on Groq reason before answering; low effort keeps token use down.
       ...(model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" as const } : {}),
     });
 
@@ -240,7 +264,7 @@ export async function runAssistant(options: {
 
     if (toolCalls.length === 0) {
       const reply = message?.content?.trim();
-      return result(reply || "Sorry, I couldn't come up with a reply. Could you try rephrasing?");
+      return result(reply || summarizeChanges() || "Sorry, I couldn't come up with a reply. Could you try rephrasing?");
     }
 
     messages.push({ role: "assistant", content: message?.content ?? null, tool_calls: toolCalls });
@@ -251,5 +275,10 @@ export async function runAssistant(options: {
     }
   }
 
-  return result("Sorry, that took too many steps. Could you break it into smaller requests?");
+  const changes = summarizeChanges();
+  return result(
+    changes
+      ? `${changes} I stopped there because it took too many steps.`
+      : "Sorry, that took too many steps. Could you break it into smaller requests?"
+  );
 }

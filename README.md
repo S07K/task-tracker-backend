@@ -2,7 +2,7 @@
 
 REST API for [Task Tracker](https://github.com/S07K/task-tracker-frontend): user accounts with email verification, JWT authentication, per-user calendar tasks, and an AI assistant that manages tasks through chat.
 
-Built with Express, TypeScript, MongoDB (Mongoose), bcrypt, Nodemailer and Groq, and deployed on Vercel.
+Built with Express, TypeScript, MongoDB (Mongoose), bcrypt, Nodemailer and Groq (or a local Ollama model in development), and deployed on Vercel.
 
 ## Contents
 
@@ -18,10 +18,10 @@ Built with Express, TypeScript, MongoDB (Mongoose), bcrypt, Nodemailer and Groq,
 
 ### Prerequisites
 
-- Node.js **20 or newer**
+- Node.js **22 or newer**
 - A MongoDB database (e.g. MongoDB Atlas)
 - A Gmail account with an [App Password](https://support.google.com/accounts/answer/185833) for sending verification emails
-- A [Groq API key](https://console.groq.com/keys) for the AI assistant (the free tier works; optional if you don't use the assistant)
+- For the AI assistant (optional): a [Groq API key](https://console.groq.com/keys) (the free tier works), or [Ollama](https://ollama.com) with a local model for development — see [Using a local model](#using-a-local-model-ollama)
 
 ### Setup
 
@@ -50,8 +50,11 @@ Copy `example.env` to `.env` (never commit `.env`).
 | `GMAIL_ID` | Gmail address used to send verification emails |
 | `GMAIL_PASSWORD` | Gmail App Password (not the account password) |
 | `JWT_TOKEN_SECRET` | Secret used to sign login tokens. Use a long random string |
-| `GROQ_API_KEY` | Groq API key for the AI assistant. Without it, `/chat` returns a "not set up" error |
-| `GROQ_MODEL` | Optional Groq model id for the assistant. Defaults to `openai/gpt-oss-120b` |
+| `AI_PROVIDER` | Where the AI assistant's model runs: `groq` (default, hosted) or `ollama` (local, for development) |
+| `GROQ_API_KEY` | Groq API key. Required when `AI_PROVIDER` is `groq`; without it `/chat` returns a "not set up" error |
+| `GROQ_MODEL` | Optional Groq model id. Defaults to `openai/gpt-oss-120b` |
+| `OLLAMA_BASE_URL` | Optional Ollama API URL. Defaults to `http://localhost:11434/v1` |
+| `OLLAMA_MODEL` | Optional Ollama model. Defaults to `llama3.2:3b` |
 
 ### MongoDB credentials
 
@@ -132,7 +135,7 @@ Event dates are stored as local date-time strings: `start`/`end` as `YYYY-MM-DDT
 
 ### AI assistant — `/chat`
 
-Both routes require authentication. The assistant runs on [Groq](https://console.groq.com) (default model `openai/gpt-oss-120b`, change it with `GROQ_MODEL`) and can use four tools, which only ever act on the signed-in user's tasks: `list_tasks`, `create_task`, `update_task` and `delete_tasks`.
+Both routes require authentication. The assistant runs on [Groq](https://console.groq.com) (default model `openai/gpt-oss-120b`) or, in development, a local [Ollama](https://ollama.com) model — see [Using a local model](#using-a-local-model-ollama). It can use four tools, which only ever act on the signed-in user's tasks: `list_tasks`, `create_task`, `update_task` and `delete_tasks`.
 
 | Method | Path | Body | Response |
 | --- | --- | --- | --- |
@@ -144,7 +147,31 @@ Both routes require authentication. The assistant runs on [Groq](https://console
 - `actions` lists tasks the assistant created or updated (`{ type: "created" | "updated", task }`); `changed` is `true` when any task changed.
 - **Deletes need confirmation.** `delete_tasks` never deletes anything: the tasks come back as `pendingAction: { type: "delete", tasks }`, and the app calls `/chat/confirm` only after the user presses Confirm.
 - **Limits**, to stay within Groq's free tier (shared by everyone using one API key): the last 12 messages, 2,000 characters per message and 5 tool steps per request.
-- **Errors**: `503` when `GROQ_API_KEY` isn't set, `429` (with `retryAfter` in seconds when Groq provides it) when Groq is rate-limiting, and `502` for other Groq failures.
+- **Errors**: `503` when the assistant isn't configured or the model can't be reached, `429` (with `retryAfter` in seconds when provided) when Groq is rate-limiting, and `502` for other model errors. With Ollama, error messages say how to fix the problem (start Ollama, pull the model).
+
+#### Using a local model (Ollama)
+
+For local development you can run the assistant on your own machine instead of Groq — no API key or rate limits.
+
+1. Install [Ollama](https://ollama.com) and pull a model that supports tool calling:
+
+   ```bash
+   ollama pull llama3.2:3b
+   ```
+
+2. In `.env`, set:
+
+   ```
+   AI_PROVIDER=ollama
+   ```
+
+   `OLLAMA_MODEL` and `OLLAMA_BASE_URL` are optional (defaults: `llama3.2:3b` at `http://localhost:11434/v1`).
+
+3. Run `npm run dev`. The startup log shows which model the assistant uses, e.g. `AI assistant: ollama (llama3.2:3b at http://localhost:11434/v1)`.
+
+Switch back to Groq by removing `AI_PROVIDER` (or setting it to `groq`).
+
+Small local models are fast and free but much less reliable at tool calling than the hosted model, so double-check what they change. In a quick test of four requests (a schedule question, adding a task, moving a task, deleting a task), `qwen3.5:2b` handled 3 and `llama3.2:3b` handled 1 — `llama3.2:3b` often passed dates in the wrong format or wrote tool calls as text. If the assistant misbehaves locally, try `OLLAMA_MODEL=qwen3.5:2b` or a larger model. Deletes still always need confirmation, whichever model you use.
 
 ## Security
 
@@ -185,6 +212,7 @@ Deployed on Vercel from the `develop` branch using `vercel.json`, which serves t
 ```
 ├── index.ts                      # Express app: middleware, MongoDB connection, routers
 ├── config/
+│   ├── ai.ts                     # AI assistant provider settings (Groq or Ollama) and client
 │   └── mongo.ts                  # Builds the MongoDB URL with encoded credentials
 ├── middleware/
 │   └── auth.ts                   # Verifies the Bearer token and sets req.user
@@ -199,7 +227,7 @@ Deployed on Vercel from the `develop` branch using `vercel.json`, which serves t
 │   ├── passwords.ts              # bcrypt hash/verify helpers
 │   └── utils.ts                  # Response helper, verification email
 ├── services/
-│   ├── assistant.ts              # Groq tool-calling loop, tool definitions, system prompt
+│   ├── assistant.ts              # Tool-calling loop, tool definitions, system prompt
 │   └── tasks.ts                  # Validated, user-scoped task operations used by the assistant
 ├── scripts/
 │   └── hash-plaintext-passwords.ts

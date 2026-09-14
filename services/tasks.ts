@@ -39,6 +39,15 @@ const DAY_MINUTES = 24 * 60;
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
+// Models (especially small local ones) often add seconds or a trailing Z, e.g.
+// "2026-09-15T07:00:00Z". Accept those and keep HH:mm like the calendar.
+const LOOSE_DATETIME_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?Z?$/;
+
+function normalizeDateInput(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const match = value.match(LOOSE_DATETIME_RE);
+  return match ? `${match[1]}T${match[2]}:${match[3]}` : value;
+}
 
 // Stored dates are local wall-clock strings with no time zone, so all arithmetic
 // is done in UTC on those numbers and formatted back the same way.
@@ -70,6 +79,24 @@ export function dayOfWeek(date: string): string {
   return parsed ? parsed.toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" }) : "";
 }
 
+/**
+ * Lists dates from yesterday to two weeks ahead with weekdays, e.g.
+ * "Mon 2026-09-14 (today), Tue 2026-09-15 (tomorrow), ...", so models don't
+ * have to work out weekday arithmetic themselves.
+ */
+export function describeDates(now: string): string {
+  const today = parseWallClock(now.slice(0, 10));
+  if (!today) return "";
+  const labels: Record<number, string> = { [-1]: " (yesterday)", 0: " (today)", 1: " (tomorrow)" };
+  const days: string[] = [];
+  for (let offset = -1; offset <= 13; offset++) {
+    const date = addMinutes(today, offset * DAY_MINUTES);
+    const weekday = date.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
+    days.push(`${weekday} ${formatDate(date)}${labels[offset] ?? ""}`);
+  }
+  return days.join(", ");
+}
+
 function requireDate(value: unknown, field: string): Date {
   const parsed = typeof value === "string" && DATE_RE.test(value) ? parseWallClock(value) : null;
   if (!parsed) throw new TaskInputError(`${field} must be a valid date in YYYY-MM-DD format`);
@@ -77,7 +104,8 @@ function requireDate(value: unknown, field: string): Date {
 }
 
 function requireDateTime(value: unknown, field: string): Date {
-  const parsed = typeof value === "string" && DATETIME_RE.test(value) ? parseWallClock(value) : null;
+  const normalized = typeof value === "string" ? normalizeDateInput(value.trim()) : undefined;
+  const parsed = normalized && DATETIME_RE.test(normalized) ? parseWallClock(normalized) : null;
   if (!parsed) throw new TaskInputError(`${field} must be a valid date and time in YYYY-MM-DDTHH:mm format (24-hour)`);
   return parsed;
 }
@@ -104,7 +132,10 @@ function optionalString(value: unknown, field: string): string | undefined {
 }
 
 function optionalBoolean(value: unknown, field: string): boolean | undefined {
-  if (value === undefined || value === null) return undefined;
+  if (value === undefined || value === null || value === "") return undefined;
+  // Some models send booleans as strings.
+  if (value === "true") return true;
+  if (value === "false") return false;
   if (typeof value !== "boolean") throw new TaskInputError(`${field} must be true or false`);
   return value;
 }
@@ -174,8 +205,9 @@ function generateEventId() {
 }
 
 export async function listTasks(userId: string, args: Record<string, unknown>) {
-  const from = optionalString(args.from, "from");
-  const to = optionalString(args.to, "to");
+  // Dates only; a date-time is cut down to its date.
+  const from = normalizeDateInput(optionalString(args.from, "from"))?.slice(0, 10);
+  const to = normalizeDateInput(optionalString(args.to, "to"))?.slice(0, 10);
   const query = optionalString(args.query, "query")?.toLowerCase();
   if (from) requireDate(from, "from");
   if (to) requireDate(to, "to");
@@ -204,7 +236,11 @@ export async function listTasks(userId: string, args: Record<string, unknown>) {
 export async function createTask(userId: string, args: Record<string, unknown>): Promise<TaskView> {
   const title = cleanTitle(args.title);
   const allDay = optionalBoolean(args.allDay, "allDay") ?? false;
-  const schedule = buildSchedule(allDay, args.start, optionalString(args.end, "end"));
+  const schedule = buildSchedule(
+    allDay,
+    normalizeDateInput(optionalString(args.start, "start")),
+    normalizeDateInput(optionalString(args.end, "end"))
+  );
   const color = args.color === undefined || args.color === null || args.color === "" ? DEFAULT_COLOR : resolveColor(args.color);
 
   const event = new EventSchema({
@@ -238,12 +274,14 @@ export async function updateTask(userId: string, args: Record<string, unknown>):
   const current = toTaskView(existing);
 
   const updates: Record<string, unknown> = {};
-  if (args.title !== undefined) updates.title = cleanTitle(args.title);
-  if (args.color !== undefined) updates.backgroundColor = resolveColor(args.color);
+  // Models often send every field, using null or "" for the ones that shouldn't change.
+  const isProvided = (value: unknown) => value !== undefined && value !== null && value !== "";
+  if (isProvided(args.title)) updates.title = cleanTitle(args.title);
+  if (isProvided(args.color)) updates.backgroundColor = resolveColor(args.color);
 
   const allDayInput = optionalBoolean(args.allDay, "allDay");
-  const startInput = optionalString(args.start, "start");
-  const endInput = optionalString(args.end, "end");
+  const startInput = normalizeDateInput(optionalString(args.start, "start"));
+  const endInput = normalizeDateInput(optionalString(args.end, "end"));
 
   if (allDayInput !== undefined || startInput !== undefined || endInput !== undefined) {
     const allDay = allDayInput ?? current.allDay;

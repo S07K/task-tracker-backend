@@ -19,6 +19,7 @@ const users_1 = __importDefault(require("./routes/users"));
 const chat_1 = __importDefault(require("./routes/chat"));
 const dotenv_1 = __importDefault(require("dotenv"));
 const mongo_1 = require("./config/mongo");
+const ai_1 = require("./config/ai");
 dotenv_1.default.config();
 const mongoose = require("mongoose");
 const APP_URL = process.env.APP_URL;
@@ -54,5 +55,6 @@ app.use("/users", users_1.default);
 app.use("/chat", chat_1.default);
 app.listen(PORT, () => {
     console.log("Server listening on port 5001");
+    console.log(`AI assistant: ${(0, ai_1.describeAiConfig)()}`);
 });
 //# sourceMappingURL=index.js.map

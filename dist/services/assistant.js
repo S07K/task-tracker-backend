@@ -14,7 +14,8 @@ exports.sanitizeHistory = sanitizeHistory;
 exports.runAssistant = runAssistant;
 const tasks_1 = require("./tasks");
 // Limits keep each chat request small: Groq's free tier allows ~8K tokens/minute
-// per organization, shared by every user of the app.
+// per organization, shared by every user of the app, and small local models
+// work best with short contexts.
 exports.MAX_HISTORY_MESSAGES = 12;
 exports.MAX_MESSAGE_CHARS = 2000;
 const MAX_TOOL_ROUNDS = 5;
@@ -101,16 +102,21 @@ function buildSystemPrompt(now, timeZone) {
     return [
         "You are the Task Tracker assistant. You help the signed-in user manage the tasks on their calendar using the provided tools.",
         "",
-        "Rules:",
-        "- Use tools to read or change tasks. Never invent task ids: call list_tasks to find them.",
-        "- Timed tasks use YYYY-MM-DDTHH:mm (24-hour); all-day tasks use YYYY-MM-DD. If no duration is given, timed tasks last 30 minutes.",
+        "Using the tools:",
+        "- To answer questions about the schedule, call list_tasks.",
+        "- To change, move or delete an existing task, first call list_tasks to find its id, then call update_task or delete_tasks with that id. Never create a new task to move an existing one, and never invent ids.",
+        "- In tool arguments, always write dates as YYYY-MM-DD and times as YYYY-MM-DDTHH:mm (24-hour), for example 2026-09-15T14:00. Use the date list below to turn words like \"tomorrow\" or \"Friday\" into dates.",
+        "- If no duration is given, timed tasks last 30 minutes.",
+        '- Task titles are short and never include the date or time ("Gym", not "Gym tomorrow at 7am").',
         "- delete_tasks does not delete anything. After calling it, tell the user to press Confirm to delete.",
+        "- If a tool returns an error, fix the arguments and call the tool again instead of asking the user about formats.",
         "- If a request is ambiguous (for example several tasks match), ask a short question instead of guessing.",
-        "- If a tool returns an error, fix the arguments and retry, or explain the problem to the user.",
         "- Only help with the user's tasks and schedule. Politely decline anything else.",
-        "- Keep replies short and friendly. Write times like 3:30pm and dates like Mon, Sep 14. Never show task ids.",
         "",
-        `Current local date and time: ${now} (${(0, tasks_1.dayOfWeek)(now)}), time zone ${timeZone}. Resolve relative dates such as "tomorrow" or "next Friday" from this.`,
+        "Replying to the user: keep it short and friendly, write times like 3:30pm and dates like Tue, Sep 15, and never show task ids.",
+        "",
+        `Now: ${now} (${(0, tasks_1.dayOfWeek)(now)}), time zone ${timeZone}.`,
+        `Dates: ${(0, tasks_1.describeDates)(now)}`,
     ].join("\n");
 }
 /** Keeps only well-formed user/assistant turns from the client, trimmed to the history limits. */
@@ -128,6 +134,9 @@ function sanitizeHistory(raw) {
 }
 function runTool(call, state) {
     return __awaiter(this, void 0, void 0, function* () {
+        if (call.type !== "function") {
+            return { error: "Unsupported tool call type; use the provided functions" };
+        }
         let args;
         try {
             args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
@@ -174,12 +183,22 @@ function runTool(call, state) {
 function runAssistant(options) {
     return __awaiter(this, void 0, void 0, function* () {
         var _a, _b, _c, _d;
-        const { client, model, userId, history, now, timeZone } = options;
+        const { client, model, userId, history, now, timeZone, temperature } = options;
         const state = { userId, actions: [], pendingDeletes: new Map() };
         const messages = [
             { role: "system", content: buildSystemPrompt(now, timeZone) },
             ...history,
         ];
+        // Short description of what changed, for when the model ends without a reply
+        // (small local models sometimes do) or runs out of steps.
+        const summarizeChanges = () => {
+            const parts = state.actions.map((action) => `${action.type === "created" ? "Created" : "Updated"} "${action.task.title}".`);
+            const pending = Array.from(state.pendingDeletes.values());
+            if (pending.length) {
+                parts.push(`Press Confirm to delete ${pending.length === 1 ? `"${pending[0].title}"` : `${pending.length} tasks`}.`);
+            }
+            return parts.join(" ");
+        };
         const result = (reply) => ({
             reply,
             actions: state.actions,
@@ -187,13 +206,13 @@ function runAssistant(options) {
             changed: state.actions.length > 0,
         });
         for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-            const completion = yield client.chat.completions.create(Object.assign({ model,
-                messages, tools: TOOLS, tool_choice: "auto", max_completion_tokens: MAX_COMPLETION_TOKENS }, (model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" } : {})));
+            const completion = yield client.chat.completions.create(Object.assign(Object.assign({ model,
+                messages, tools: TOOLS, tool_choice: "auto", max_completion_tokens: MAX_COMPLETION_TOKENS }, (temperature !== undefined ? { temperature } : {})), (model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" } : {})));
             const message = (_a = completion.choices[0]) === null || _a === void 0 ? void 0 : _a.message;
             const toolCalls = (_b = message === null || message === void 0 ? void 0 : message.tool_calls) !== null && _b !== void 0 ? _b : [];
             if (toolCalls.length === 0) {
                 const reply = (_c = message === null || message === void 0 ? void 0 : message.content) === null || _c === void 0 ? void 0 : _c.trim();
-                return result(reply || "Sorry, I couldn't come up with a reply. Could you try rephrasing?");
+                return result(reply || summarizeChanges() || "Sorry, I couldn't come up with a reply. Could you try rephrasing?");
             }
             messages.push({ role: "assistant", content: (_d = message === null || message === void 0 ? void 0 : message.content) !== null && _d !== void 0 ? _d : null, tool_calls: toolCalls });
             // Run calls in order so a create followed by an update behaves predictably.
@@ -202,7 +221,10 @@ function runAssistant(options) {
                 messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(output) });
             }
         }
-        return result("Sorry, that took too many steps. Could you break it into smaller requests?");
+        const changes = summarizeChanges();
+        return result(changes
+            ? `${changes} I stopped there because it took too many steps.`
+            : "Sorry, that took too many steps. Could you break it into smaller requests?");
     });
 }
 //# sourceMappingURL=assistant.js.map

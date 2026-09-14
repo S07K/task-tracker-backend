@@ -12,33 +12,56 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-const groq_sdk_1 = __importDefault(require("groq-sdk"));
+const openai_1 = __importDefault(require("openai"));
 const utils_1 = __importDefault(require("./utils"));
+const ai_1 = require("../config/ai");
 const assistant_1 = require("../services/assistant");
 const tasks_1 = require("../services/tasks");
 const authMiddleware = require("../middleware/auth");
 const { apiResponse } = utils_1.default;
 const express = require("express");
 const app = express.Router();
-const DEFAULT_MODEL = "openai/gpt-oss-120b";
 const CLIENT_NOW_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 const TIME_ZONE_RE = /^[A-Za-z0-9_+\-/]{1,64}$/;
-let groqClient = null;
-const getGroqClient = () => {
-    if (!process.env.GROQ_API_KEY)
-        return null;
-    if (!groqClient)
-        groqClient = new groq_sdk_1.default({ apiKey: process.env.GROQ_API_KEY });
-    return groqClient;
-};
 const errorResponse = (message, code, extra = {}) => (Object.assign(Object.assign({}, apiResponse({ message, error: { message, code } })), extra));
 const serverNowUtc = () => new Date().toISOString().slice(0, 16);
+/** Maps model-provider failures to messages; local (Ollama) errors include how to fix them. */
+function providerErrorResponse(error, config) {
+    var _a;
+    const isLocal = config.provider === "ollama";
+    if (error instanceof openai_1.default.RateLimitError) {
+        const retryAfter = Number((_a = error.headers) === null || _a === void 0 ? void 0 : _a.get("retry-after")) || undefined;
+        return errorResponse("The AI assistant is busy right now. Please try again in a moment.", "429", { retryAfter });
+    }
+    if (error instanceof openai_1.default.APIConnectionError) {
+        console.error(`Can't reach the AI model at ${config.baseURL}:`, error.message);
+        return errorResponse(isLocal
+            ? `Can't reach the local AI model at ${config.baseURL}. Make sure Ollama is running (ollama serve).`
+            : "Couldn't reach the AI service. Please try again.", "503");
+    }
+    if (error instanceof openai_1.default.APIError) {
+        console.error(`AI provider error (${config.provider}, ${config.model})`, error.status, error.message);
+        if (isLocal && error instanceof openai_1.default.NotFoundError) {
+            return errorResponse(`The model "${config.model}" isn't available in Ollama. Pull it with: ollama pull ${config.model}`, "503");
+        }
+        return errorResponse(isLocal
+            ? `The local model "${config.model}" returned an error: ${error.message}`
+            : "The AI assistant couldn't respond. Please try again.", "502");
+    }
+    return null;
+}
 app.use(authMiddleware);
 // chat with the task assistant
 app.post("/", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d;
-    const client = getGroqClient();
-    if (!client) {
+    var _a, _b, _c;
+    let config;
+    try {
+        config = (0, ai_1.getAiConfig)();
+    }
+    catch (error) {
+        if (!(error instanceof ai_1.AiConfigError))
+            throw error;
+        console.error("AI assistant is not configured:", error.message);
         res.send(errorResponse("The AI assistant isn't set up on the server yet.", "503"));
         return;
     }
@@ -47,8 +70,9 @@ app.post("/", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
         const clientNow = (_b = req.body) === null || _b === void 0 ? void 0 : _b.clientNow;
         const timeZone = (_c = req.body) === null || _c === void 0 ? void 0 : _c.timeZone;
         const result = yield (0, assistant_1.runAssistant)({
-            client,
-            model: process.env.GROQ_MODEL || DEFAULT_MODEL,
+            client: (0, ai_1.getAiClient)(config),
+            model: config.model,
+            temperature: config.temperature,
             userId: req.user.id,
             history,
             now: typeof clientNow === "string" && CLIENT_NOW_RE.test(clientNow) ? clientNow : serverNowUtc(),
@@ -59,19 +83,15 @@ app.post("/", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     catch (error) {
         if (error instanceof tasks_1.TaskInputError) {
             res.send(errorResponse(error.message, "400"));
+            return;
         }
-        else if (error instanceof groq_sdk_1.default.RateLimitError) {
-            const retryAfter = Number((_d = error.headers) === null || _d === void 0 ? void 0 : _d.get("retry-after")) || undefined;
-            res.send(errorResponse("The AI assistant is busy right now. Please try again in a moment.", "429", { retryAfter }));
+        const providerError = providerErrorResponse(error, config);
+        if (providerError) {
+            res.send(providerError);
+            return;
         }
-        else if (error instanceof groq_sdk_1.default.APIError) {
-            console.error("Groq API error", error.status, error.message);
-            res.send(errorResponse("The AI assistant couldn't respond. Please try again.", "502"));
-        }
-        else {
-            console.error("Error in assistant chat", error);
-            res.send(errorResponse("Something went wrong. Please try again.", "500"));
-        }
+        console.error("Error in assistant chat", error);
+        res.send(errorResponse("Something went wrong. Please try again.", "500"));
     }
 }));
 // run an action the user confirmed in the chat (currently: deleting tasks)
