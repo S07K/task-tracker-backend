@@ -31,7 +31,10 @@ const TOPIC_CHECK_PROMPT = [
   "Reply with exactly one word: TASKS or OTHER.",
 ].join("\n");
 
-const MAX_CHECK_TOKENS = 256;
+// The answer is one word, but reasoning models (gpt-oss on Groq, qwen3.5 on Ollama)
+// think first, and on Groq that thinking counts toward this limit. A cut-off check
+// has no answer and lets the message through, so leave room; only used tokens are billed.
+const MAX_CHECK_TOKENS = 1024;
 const MAX_PREVIOUS_REPLY_CHARS = 500;
 
 /**
