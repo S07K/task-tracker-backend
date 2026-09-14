@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import eventRouter from "./routes/events";
 import userRouter from "./routes/users";
+import chatRouter from "./routes/chat";
 import dotenv from "dotenv";
 import { buildMongoUrl } from "./config/mongo";
 dotenv.config();
@@ -40,6 +41,7 @@ app.get("/", async (req: any, res: any) => {
 });
 app.use("/events", eventRouter);
 app.use("/users", userRouter);
+app.use("/chat", chatRouter);
 
 app.listen(PORT, () => {
   console.log("Server listening on port 5001");

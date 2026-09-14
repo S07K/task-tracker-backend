@@ -1,8 +1,8 @@
 # Task Tracker — Backend
 
-REST API for [Task Tracker](https://github.com/S07K/task-tracker-frontend): user accounts with email verification, JWT authentication, and per-user calendar tasks.
+REST API for [Task Tracker](https://github.com/S07K/task-tracker-frontend): user accounts with email verification, JWT authentication, per-user calendar tasks, and an AI assistant that manages tasks through chat.
 
-Built with Express, TypeScript, MongoDB (Mongoose), bcrypt and Nodemailer, and deployed on Vercel.
+Built with Express, TypeScript, MongoDB (Mongoose), bcrypt, Nodemailer and Groq, and deployed on Vercel.
 
 ## Contents
 
@@ -21,6 +21,7 @@ Built with Express, TypeScript, MongoDB (Mongoose), bcrypt and Nodemailer, and d
 - Node.js **20 or newer**
 - A MongoDB database (e.g. MongoDB Atlas)
 - A Gmail account with an [App Password](https://support.google.com/accounts/answer/185833) for sending verification emails
+- A [Groq API key](https://console.groq.com/keys) for the AI assistant (the free tier works; optional if you don't use the assistant)
 
 ### Setup
 
@@ -49,6 +50,8 @@ Copy `example.env` to `.env` (never commit `.env`).
 | `GMAIL_ID` | Gmail address used to send verification emails |
 | `GMAIL_PASSWORD` | Gmail App Password (not the account password) |
 | `JWT_TOKEN_SECRET` | Secret used to sign login tokens. Use a long random string |
+| `GROQ_API_KEY` | Groq API key for the AI assistant. Without it, `/chat` returns a "not set up" error |
+| `GROQ_MODEL` | Optional Groq model id for the assistant. Defaults to `openai/gpt-oss-120b` |
 
 ### MongoDB credentials
 
@@ -127,11 +130,28 @@ Every events route requires authentication and only ever reads or changes **the 
 
 Event dates are stored as local date-time strings: `start`/`end` as `YYYY-MM-DDTHH:mm`, `startStr`/`endStr` as `YYYY-MM-DD`. For all-day events, `end` is exclusive (the day after the last day).
 
+### AI assistant — `/chat`
+
+Both routes require authentication. The assistant runs on [Groq](https://console.groq.com) (default model `openai/gpt-oss-120b`, change it with `GROQ_MODEL`) and can use four tools, which only ever act on the signed-in user's tasks: `list_tasks`, `create_task`, `update_task` and `delete_tasks`.
+
+| Method | Path | Body | Response |
+| --- | --- | --- | --- |
+| `POST` | `/chat` | `{ messages: [{ role, content }], clientNow?, timeZone? }` | `{ message, reply, actions, pendingAction, changed }` |
+| `POST` | `/chat/confirm` | `{ action: { type: "delete", taskIds } }` | `{ message, deleted, changed }` (the tasks that were deleted) |
+
+- `messages` is the conversation so far; `role` is `user` or `assistant`, and the last message must be from the user.
+- `clientNow` (`YYYY-MM-DDTHH:mm`) and `timeZone` (e.g. `Asia/Kolkata`) let the assistant resolve dates like "tomorrow" in the user's time zone. Without them it uses the server's UTC time.
+- `actions` lists tasks the assistant created or updated (`{ type: "created" | "updated", task }`); `changed` is `true` when any task changed.
+- **Deletes need confirmation.** `delete_tasks` never deletes anything: the tasks come back as `pendingAction: { type: "delete", tasks }`, and the app calls `/chat/confirm` only after the user presses Confirm.
+- **Limits**, to stay within Groq's free tier (shared by everyone using one API key): the last 12 messages, 2,000 characters per message and 5 tool steps per request.
+- **Errors**: `503` when `GROQ_API_KEY` isn't set, `429` (with `retryAfter` in seconds when Groq provides it) when Groq is rate-limiting, and `502` for other Groq failures.
+
 ## Security
 
 - **Passwords** are hashed with bcrypt. Accounts created before hashing was introduced are rehashed automatically on their next successful login.
 - **Event ownership**: the owner of an event always comes from the verified token, never the request body, and `id`/`groupId` can't be changed through updates.
 - **Search** only accepts known fields with plain values, so MongoDB query operators (`$ne`, `$where`, …) in a request body are ignored.
+- **AI assistant**: tool calls run with the signed-in user's id from the verified token, validate every argument before touching the database, and can't delete anything without the user's confirmation. Client-sent history is limited to user and assistant messages, so a client can't inject system instructions.
 
 ### Password hashing
 
@@ -175,8 +195,12 @@ Deployed on Vercel from the `develop` branch using `vercel.json`, which serves t
 ├── routes/
 │   ├── events.ts                 # /events routes
 │   ├── users.ts                  # /users routes
+│   ├── chat.ts                   # /chat routes (AI assistant)
 │   ├── passwords.ts              # bcrypt hash/verify helpers
 │   └── utils.ts                  # Response helper, verification email
+├── services/
+│   ├── assistant.ts              # Groq tool-calling loop, tool definitions, system prompt
+│   └── tasks.ts                  # Validated, user-scoped task operations used by the assistant
 ├── scripts/
 │   └── hash-plaintext-passwords.ts
 ├── dist/                         # Compiled output (committed, served by Vercel)
