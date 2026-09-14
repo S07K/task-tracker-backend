@@ -1,8 +1,8 @@
 # Task Tracker — Backend
 
-REST API for [Task Tracker](https://github.com/S07K/task-tracker-frontend): user accounts with email verification, JWT authentication, and per-user calendar tasks.
+REST API for [Task Tracker](https://github.com/S07K/task-tracker-frontend): user accounts with email verification, JWT authentication, per-user calendar tasks, and an AI assistant that manages tasks through chat.
 
-Built with Express, TypeScript, MongoDB (Mongoose), bcrypt and Nodemailer, and deployed on Vercel.
+Built with Express, TypeScript, MongoDB (Mongoose), bcrypt, Nodemailer and Groq (or a local Ollama model in development), and deployed on Vercel.
 
 ## Contents
 
@@ -18,9 +18,10 @@ Built with Express, TypeScript, MongoDB (Mongoose), bcrypt and Nodemailer, and d
 
 ### Prerequisites
 
-- Node.js **20 or newer**
+- Node.js **22 or newer**
 - A MongoDB database (e.g. MongoDB Atlas)
 - A Gmail account with an [App Password](https://support.google.com/accounts/answer/185833) for sending verification emails
+- For the AI assistant (optional): a [Groq API key](https://console.groq.com/keys) (the free tier works), or [Ollama](https://ollama.com) with a local model for development — see [Using a local model](#using-a-local-model-ollama)
 
 ### Setup
 
@@ -49,6 +50,11 @@ Copy `example.env` to `.env` (never commit `.env`).
 | `GMAIL_ID` | Gmail address used to send verification emails |
 | `GMAIL_PASSWORD` | Gmail App Password (not the account password) |
 | `JWT_TOKEN_SECRET` | Secret used to sign login tokens. Use a long random string |
+| `AI_PROVIDER` | Where the AI assistant's model runs: `groq` (default, hosted) or `ollama` (local, for development) |
+| `GROQ_API_KEY` | Groq API key. Required when `AI_PROVIDER` is `groq`; without it `/chat` returns a "not set up" error |
+| `GROQ_MODEL` | Optional Groq model id. Defaults to `openai/gpt-oss-120b` |
+| `OLLAMA_BASE_URL` | Optional Ollama API URL. Defaults to `http://localhost:11434/v1` |
+| `OLLAMA_MODEL` | Optional Ollama model. Defaults to `llama3.2:3b` |
 
 ### MongoDB credentials
 
@@ -127,11 +133,53 @@ Every events route requires authentication and only ever reads or changes **the 
 
 Event dates are stored as local date-time strings: `start`/`end` as `YYYY-MM-DDTHH:mm`, `startStr`/`endStr` as `YYYY-MM-DD`. For all-day events, `end` is exclusive (the day after the last day).
 
+### AI assistant — `/chat`
+
+Both routes require authentication. The assistant runs on [Groq](https://console.groq.com) (default model `openai/gpt-oss-120b`) or, in development, a local [Ollama](https://ollama.com) model — see [Using a local model](#using-a-local-model-ollama). It can use four tools, which only ever act on the signed-in user's tasks: `list_tasks`, `create_task`, `update_task` and `delete_tasks`.
+
+| Method | Path | Body | Response |
+| --- | --- | --- | --- |
+| `POST` | `/chat` | `{ messages: [{ role, content }], clientNow?, timeZone? }` | `{ message, reply, actions, pendingAction, changed }` |
+| `POST` | `/chat/confirm` | `{ action: { type: "delete", taskIds } }` | `{ message, deleted, changed }` (the tasks that were deleted) |
+
+- `messages` is the conversation so far; `role` is `user` or `assistant`, and the last message must be from the user.
+- `clientNow` (`YYYY-MM-DDTHH:mm`) and `timeZone` (e.g. `Asia/Kolkata`) let the assistant resolve dates like "tomorrow" in the user's time zone. Without them it uses the server's UTC time.
+- `actions` lists tasks the assistant created or updated (`{ type: "created" | "updated", task }`); `changed` is `true` when any task changed.
+- **Deletes need confirmation.** `delete_tasks` never deletes anything: the tasks come back as `pendingAction: { type: "delete", tasks }`, and the app calls `/chat/confirm` only after the user presses Confirm.
+- **Off-topic messages are screened first** (`services/topicGuard.ts`). Messages that clearly mention tasks or dates ("meeting", "tomorrow", "3pm", "Sep 20", …) go straight to the assistant. Anything else gets a quick check with the same model (no tools, a one-word TASKS/OTHER answer) that also sees the assistant's previous message, so follow-ups like "yes please" pass. If the message isn't about tasks, the reply is a fixed "I can only help with your tasks and schedule…" and the full tool-calling request is skipped. Unclear answers let the message through.
+- **Limits**, to stay within Groq's free tier (shared by everyone using one API key): the last 12 messages, 2,000 characters per message and 5 tool steps per request.
+- **Errors**: `503` when the assistant isn't configured or the model can't be reached, `429` (with `retryAfter` in seconds when provided) when Groq is rate-limiting, and `502` for other model errors. With Ollama, error messages say how to fix the problem (start Ollama, pull the model).
+
+#### Using a local model (Ollama)
+
+For local development you can run the assistant on your own machine instead of Groq — no API key or rate limits.
+
+1. Install [Ollama](https://ollama.com) and pull a model that supports tool calling:
+
+   ```bash
+   ollama pull llama3.2:3b
+   ```
+
+2. In `.env`, set:
+
+   ```
+   AI_PROVIDER=ollama
+   ```
+
+   `OLLAMA_MODEL` and `OLLAMA_BASE_URL` are optional (defaults: `llama3.2:3b` at `http://localhost:11434/v1`).
+
+3. Run `npm run dev`. The startup log shows which model the assistant uses, e.g. `AI assistant: ollama (llama3.2:3b at http://localhost:11434/v1)`.
+
+Switch back to Groq by removing `AI_PROVIDER` (or setting it to `groq`).
+
+Small local models are fast and free but much less reliable at tool calling than the hosted model, so double-check what they change. In a quick test of four requests (a schedule question, adding a task, moving a task, deleting a task), `qwen3.5:2b` handled 3 and `llama3.2:3b` handled 1 — `llama3.2:3b` often passed dates in the wrong format or wrote tool calls as text. If the assistant misbehaves locally, try `OLLAMA_MODEL=qwen3.5:2b` or a larger model. Deletes still always need confirmation, whichever model you use.
+
 ## Security
 
 - **Passwords** are hashed with bcrypt. Accounts created before hashing was introduced are rehashed automatically on their next successful login.
 - **Event ownership**: the owner of an event always comes from the verified token, never the request body, and `id`/`groupId` can't be changed through updates.
 - **Search** only accepts known fields with plain values, so MongoDB query operators (`$ne`, `$where`, …) in a request body are ignored.
+- **AI assistant**: tool calls run with the signed-in user's id from the verified token, validate every argument before touching the database, and can't delete anything without the user's confirmation. Client-sent history is limited to user and assistant messages, so a client can't inject system instructions.
 
 ### Password hashing
 
@@ -165,6 +213,7 @@ Deployed on Vercel from the `develop` branch using `vercel.json`, which serves t
 ```
 ├── index.ts                      # Express app: middleware, MongoDB connection, routers
 ├── config/
+│   ├── ai.ts                     # AI assistant provider settings (Groq or Ollama) and client
 │   └── mongo.ts                  # Builds the MongoDB URL with encoded credentials
 ├── middleware/
 │   └── auth.ts                   # Verifies the Bearer token and sets req.user
@@ -175,8 +224,13 @@ Deployed on Vercel from the `develop` branch using `vercel.json`, which serves t
 ├── routes/
 │   ├── events.ts                 # /events routes
 │   ├── users.ts                  # /users routes
+│   ├── chat.ts                   # /chat routes (AI assistant)
 │   ├── passwords.ts              # bcrypt hash/verify helpers
 │   └── utils.ts                  # Response helper, verification email
+├── services/
+│   ├── assistant.ts              # Tool-calling loop, tool definitions, system prompt
+│   ├── tasks.ts                  # Validated, user-scoped task operations used by the assistant
+│   └── topicGuard.ts             # Screens off-topic messages before the tool-calling request
 ├── scripts/
 │   └── hash-plaintext-passwords.ts
 ├── dist/                         # Compiled output (committed, served by Vercel)

@@ -1,0 +1,376 @@
+import type OpenAI from "openai";
+import type {
+  ChatCompletionFunctionTool,
+  ChatCompletionMessageParam,
+  ChatCompletionMessageToolCall,
+} from "openai/resources/chat/completions";
+import {
+  TaskInputError,
+  TaskView,
+  createTask,
+  dayOfWeek,
+  describeDates,
+  findTasksForDeletion,
+  listTasks,
+  updateTask,
+} from "./tasks";
+import { OFF_TOPIC_REPLY, isOnTopic } from "./topicGuard";
+
+// Limits keep each chat request small: Groq's free tier allows ~8K tokens/minute
+// per organization, shared by every user of the app, and small local models
+// work best with short contexts.
+export const MAX_HISTORY_MESSAGES = 12;
+export const MAX_MESSAGE_CHARS = 2000;
+const MAX_TOOL_ROUNDS = 5;
+const MAX_COMPLETION_TOKENS = 1024;
+
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface AssistantAction {
+  type: "created" | "updated";
+  task: TaskView;
+}
+
+export interface AssistantResult {
+  reply: string;
+  actions: AssistantAction[];
+  /** Tasks the model asked to delete; nothing is deleted until the user confirms. */
+  pendingAction: { type: "delete"; tasks: TaskView[] } | null;
+  changed: boolean;
+}
+
+const TOOLS: ChatCompletionFunctionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "list_tasks",
+      description:
+        "List the user's tasks, optionally only those overlapping a date range and/or whose title contains some text. Use it to answer schedule questions and to find task ids.",
+      parameters: {
+        type: "object",
+        properties: {
+          from: { type: "string", description: "First date to include, YYYY-MM-DD" },
+          to: { type: "string", description: "Last date to include, YYYY-MM-DD" },
+          query: { type: "string", description: "Case-insensitive text to match in task titles" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_task",
+      description: "Create a new task on the user's calendar.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          allDay: { type: "boolean", description: "true for an all-day task" },
+          start: { type: "string", description: "Timed task: YYYY-MM-DDTHH:mm (24-hour). All-day task: YYYY-MM-DD" },
+          end: {
+            type: "string",
+            description:
+              "Optional, same format as start. Timed tasks default to 30 minutes. For all-day tasks this is the last day (inclusive).",
+          },
+          color: {
+            type: "string",
+            description: "Optional: black, blue, purple, pink, red, orange, yellow, green, cyan, or #RRGGBB",
+          },
+        },
+        required: ["title", "start"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_task",
+      description:
+        "Change an existing task. Include only the fields to change. Changing only start keeps the task's duration.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Task id from list_tasks" },
+          title: { type: "string" },
+          allDay: { type: "boolean" },
+          start: { type: "string", description: "Timed: YYYY-MM-DDTHH:mm. All-day: YYYY-MM-DD" },
+          end: { type: "string", description: "Timed: YYYY-MM-DDTHH:mm. All-day: last day YYYY-MM-DD" },
+          color: { type: "string" },
+        },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "delete_tasks",
+      description:
+        "Ask to delete one or more tasks. Nothing is deleted yet: the user must press Confirm in the app.",
+      parameters: {
+        type: "object",
+        properties: {
+          ids: { type: "array", items: { type: "string" }, description: "Task ids from list_tasks" },
+        },
+        required: ["ids"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
+
+function buildSystemPrompt(now: string, timeZone: string): string {
+  return [
+    "You are the Task Tracker assistant. You help the signed-in user manage the tasks on their calendar using the provided tools.",
+    "",
+    "Using the tools:",
+    "- To answer questions about the schedule, call list_tasks.",
+    "- To change, move or delete an existing task, first call list_tasks to find its id, then call update_task or delete_tasks with that id. Never create a new task to move an existing one, and never invent ids.",
+    "- In tool arguments, always write dates as YYYY-MM-DD and times as YYYY-MM-DDTHH:mm (24-hour), for example 2026-09-15T14:00. Use the date list below to turn words like \"tomorrow\" or \"Friday\" into dates.",
+    '- If the user gives a time range ("3-4", "from 2 to 3:30pm"), use it for start and end. Otherwise timed tasks last 30 minutes.',
+    '- Task titles are short and never include the date or time ("Gym", not "Gym tomorrow at 7am").',
+    "- delete_tasks does not delete anything. After calling it, tell the user to press Confirm to delete.",
+    "- If a tool returns an error, fix the arguments and call the tool again instead of asking the user about formats.",
+    "- If a request is ambiguous (for example several tasks match), ask a short question instead of guessing.",
+    "- Only help with the user's tasks and schedule. Politely decline anything else.",
+    "",
+    "Replying to the user: keep it short and friendly, and write times like 3:30pm and dates like Tue, Sep 15. Task ids are internal: use them only in tool calls and never mention them in replies.",
+    "",
+    `Now: ${now} (${dayOfWeek(now)}), time zone ${timeZone}.`,
+    `Dates: ${describeDates(now)}`,
+  ].join("\n");
+}
+
+/** Keeps only well-formed user/assistant turns from the client, trimmed to the history limits. */
+export function sanitizeHistory(raw: unknown): ChatTurn[] {
+  if (!Array.isArray(raw)) throw new TaskInputError("messages must be a list");
+  const turns = raw
+    .filter(
+      (m): m is ChatTurn =>
+        m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content.trim() !== ""
+    )
+    .map((m) => ({ role: m.role, content: m.content.trim().slice(0, MAX_MESSAGE_CHARS) }))
+    .slice(-MAX_HISTORY_MESSAGES);
+  if (turns.length === 0 || turns[turns.length - 1].role !== "user") {
+    throw new TaskInputError("The last message must be a non-empty user message");
+  }
+  return turns;
+}
+
+// Task ids created by routes/events.ts and services/tasks.ts look like event_<timestamp><random>.
+const EVENT_ID_PATTERN = String.raw`event_\d{6,}`;
+const MIN_KNOWN_ID_LENGTH = 6;
+// Words left over in a sentence that only existed to mention an id ("Here's its ID: …").
+const ID_SENTENCE_FILLER = new Set([
+  "a", "an", "and", "event", "for", "here", "here's", "id", "identifier", "ids", "is", "it", "it's", "its",
+  "reference", "task", "tasks", "that", "the", "this", "with", "your",
+]);
+
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Removes internal task ids from a reply. The prompt tells the model not to mention
+ * them, but models (especially small local ones) sometimes do anyway.
+ * Sentences that only announce an id are dropped; ids inside other sentences are cut out.
+ */
+export function removeTaskIds(reply: string, knownIds: Iterable<string> = []): string {
+  const idAlternatives = [
+    EVENT_ID_PATTERN,
+    ...Array.from(new Set(knownIds))
+      .filter((id) => id.length >= MIN_KNOWN_ID_LENGTH)
+      .map(escapeRegExp),
+  ].join("|");
+  const anyId = new RegExp(`(?:${idAlternatives})`);
+  if (!anyId.test(reply)) return reply;
+
+  // An id plus its label and wrapping: " (ID: `event_123`)", " id: **event_123**", " event_123".
+  const idWithLabel = new RegExp(
+    String.raw`\s*[(\[]?\s*(?:\b(?:task|event)\s+)?(?:\b(?:id|identifier)\b\s*(?:is|:|=|#)?\s*)?[\x60*_"']*(?:${idAlternatives})[\x60*_"']*\s*[)\]]?`,
+    "gi"
+  );
+  const cleanSentence = (sentence: string) =>
+    sentence
+      .replace(idWithLabel, "")
+      .replace(/\(\s*\)|\[\s*\]/g, "")
+      .replace(/\s{2,}/g, " ")
+      .replace(/\s+([.,!?;:])/g, "$1")
+      .replace(/\s*[—–:,-]+\s*([.!?]?)$/, "$1")
+      .trim();
+  const isOnlyFiller = (sentence: string) =>
+    sentence
+      .toLowerCase()
+      .replace(/’/g, "'")
+      .replace(/[*_\x60"()[\].,!?;:—–-]/g, " ")
+      .split(/\s+/)
+      .filter(Boolean)
+      .every((word) => ID_SENTENCE_FILLER.has(word));
+
+  const lines = reply.split("\n").flatMap((line) => {
+    if (!anyId.test(line)) return [line];
+    const prefix = line.match(/^\s*(?:[-*+]\s+|\d+[.)]\s+)?/)?.[0] ?? "";
+    const kept = line
+      .slice(prefix.length)
+      .split(/(?<=[.!?])\s+/)
+      .flatMap((sentence) => {
+        if (!anyId.test(sentence)) return [sentence];
+        const cleaned = cleanSentence(sentence);
+        return isOnlyFiller(cleaned) ? [] : [cleaned];
+      });
+    return kept.length ? [prefix + kept.join(" ")] : [];
+  });
+
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** Remembers real task ids from tool results so they can be removed from replies. */
+function rememberTaskIds(value: unknown, ids: Set<string>, depth = 0): void {
+  if (depth > 4 || !value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    value.forEach((item) => rememberTaskIds(item, ids, depth + 1));
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    // Only "id" fields come from stored tasks; ids the model sent may be made up.
+    if (key === "id" && typeof item === "string") ids.add(item);
+    else rememberTaskIds(item, ids, depth + 1);
+  }
+}
+
+interface ToolState {
+  userId: string;
+  actions: AssistantAction[];
+  pendingDeletes: Map<string, TaskView>;
+  knownIds: Set<string>;
+}
+
+async function runTool(call: ChatCompletionMessageToolCall, state: ToolState): Promise<unknown> {
+  if (call.type !== "function") {
+    return { error: "Unsupported tool call type; use the provided functions" };
+  }
+
+  let args: unknown;
+  try {
+    args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+  } catch {
+    return { error: "Arguments were not valid JSON" };
+  }
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return { error: "Arguments must be a JSON object" };
+  }
+  const input = args as Record<string, unknown>;
+
+  try {
+    switch (call.function.name) {
+      case "list_tasks":
+        return await listTasks(state.userId, input);
+      case "create_task": {
+        const task = await createTask(state.userId, input);
+        state.actions.push({ type: "created", task });
+        return { created: task };
+      }
+      case "update_task": {
+        const task = await updateTask(state.userId, input);
+        state.actions.push({ type: "updated", task });
+        return { updated: task };
+      }
+      case "delete_tasks": {
+        const { tasks, notFound } = await findTasksForDeletion(state.userId, input.ids);
+        if (tasks.length === 0) return { error: "None of those tasks exist", notFound };
+        tasks.forEach((task) => state.pendingDeletes.set(task.id, task));
+        return { status: "awaiting_user_confirmation", tasks, notFound };
+      }
+      default:
+        return { error: `Unknown tool: ${call.function.name}` };
+    }
+  } catch (error) {
+    if (error instanceof TaskInputError) return { error: error.message };
+    throw error;
+  }
+}
+
+export async function runAssistant(options: {
+  client: OpenAI;
+  model: string;
+  userId: string;
+  history: ChatTurn[];
+  now: string;
+  timeZone: string;
+  temperature?: number;
+}): Promise<AssistantResult> {
+  const { client, model, userId, history, now, timeZone, temperature } = options;
+  const state: ToolState = { userId, actions: [], pendingDeletes: new Map(), knownIds: new Set() };
+  const messages: ChatCompletionMessageParam[] = [
+    { role: "system", content: buildSystemPrompt(now, timeZone) },
+    ...history,
+  ];
+
+  // Short description of what changed, for when the model ends without a reply
+  // (small local models sometimes do) or runs out of steps.
+  const summarizeChanges = (): string => {
+    const parts = state.actions.map((action) => `${action.type === "created" ? "Created" : "Updated"} "${action.task.title}".`);
+    const pending = Array.from(state.pendingDeletes.values());
+    if (pending.length) {
+      parts.push(`Press Confirm to delete ${pending.length === 1 ? `"${pending[0].title}"` : `${pending.length} tasks`}.`);
+    }
+    return parts.join(" ");
+  };
+
+  const result = (reply: string): AssistantResult => ({
+    reply:
+      removeTaskIds(reply, state.knownIds) ||
+      summarizeChanges() ||
+      "Sorry, I couldn't come up with a reply. Could you try rephrasing?",
+    actions: state.actions,
+    pendingAction: state.pendingDeletes.size ? { type: "delete", tasks: Array.from(state.pendingDeletes.values()) } : null,
+    changed: state.actions.length > 0,
+  });
+
+  // Screen off-topic messages before the full tool-calling request.
+  const latestMessage = history[history.length - 1].content;
+  const previousReply = [...history].reverse().find((turn) => turn.role === "assistant")?.content;
+  if (!(await isOnTopic({ client, model, message: latestMessage, previousReply }))) {
+    return result(OFF_TOPIC_REPLY);
+  }
+
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const completion = await client.chat.completions.create({
+      model,
+      messages,
+      tools: TOOLS,
+      tool_choice: "auto",
+      max_completion_tokens: MAX_COMPLETION_TOKENS,
+      ...(temperature !== undefined ? { temperature } : {}),
+      // gpt-oss models on Groq reason before answering; low effort keeps token use down.
+      ...(model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" as const } : {}),
+    });
+
+    const message = completion.choices[0]?.message;
+    const toolCalls = message?.tool_calls ?? [];
+
+    if (toolCalls.length === 0) {
+      const reply = message?.content?.trim();
+      return result(reply || summarizeChanges() || "Sorry, I couldn't come up with a reply. Could you try rephrasing?");
+    }
+
+    messages.push({ role: "assistant", content: message?.content ?? null, tool_calls: toolCalls });
+    // Run calls in order so a create followed by an update behaves predictably.
+    for (const call of toolCalls) {
+      const output = await runTool(call, state);
+      rememberTaskIds(output, state.knownIds);
+      messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(output) });
+    }
+  }
+
+  const changes = summarizeChanges();
+  return result(
+    changes
+      ? `${changes} I stopped there because it took too many steps.`
+      : "Sorry, that took too many steps. Could you break it into smaller requests?"
+  );
+}

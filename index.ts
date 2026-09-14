@@ -2,8 +2,10 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import eventRouter from "./routes/events";
 import userRouter from "./routes/users";
+import chatRouter from "./routes/chat";
 import dotenv from "dotenv";
 import { buildMongoUrl } from "./config/mongo";
+import { describeAiConfig } from "./config/ai";
 dotenv.config();
 const mongoose = require("mongoose");
 const APP_URL = process.env.APP_URL;
@@ -40,7 +42,9 @@ app.get("/", async (req: any, res: any) => {
 });
 app.use("/events", eventRouter);
 app.use("/users", userRouter);
+app.use("/chat", chatRouter);
 
 app.listen(PORT, () => {
   console.log("Server listening on port 5001");
+  console.log(`AI assistant: ${describeAiConfig()}`);
 });
