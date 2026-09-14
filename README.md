@@ -146,6 +146,7 @@ Both routes require authentication. The assistant runs on [Groq](https://console
 - `clientNow` (`YYYY-MM-DDTHH:mm`) and `timeZone` (e.g. `Asia/Kolkata`) let the assistant resolve dates like "tomorrow" in the user's time zone. Without them it uses the server's UTC time.
 - `actions` lists tasks the assistant created or updated (`{ type: "created" | "updated", task }`); `changed` is `true` when any task changed.
 - **Deletes need confirmation.** `delete_tasks` never deletes anything: the tasks come back as `pendingAction: { type: "delete", tasks }`, and the app calls `/chat/confirm` only after the user presses Confirm.
+- **Off-topic messages are screened first** (`services/topicGuard.ts`). Messages that clearly mention tasks or dates ("meeting", "tomorrow", "3pm", "Sep 20", …) go straight to the assistant. Anything else gets a quick check with the same model (no tools, a one-word TASKS/OTHER answer) that also sees the assistant's previous message, so follow-ups like "yes please" pass. If the message isn't about tasks, the reply is a fixed "I can only help with your tasks and schedule…" and the full tool-calling request is skipped. Unclear answers let the message through.
 - **Limits**, to stay within Groq's free tier (shared by everyone using one API key): the last 12 messages, 2,000 characters per message and 5 tool steps per request.
 - **Errors**: `503` when the assistant isn't configured or the model can't be reached, `429` (with `retryAfter` in seconds when provided) when Groq is rate-limiting, and `502` for other model errors. With Ollama, error messages say how to fix the problem (start Ollama, pull the model).
 
@@ -228,7 +229,8 @@ Deployed on Vercel from the `develop` branch using `vercel.json`, which serves t
 │   └── utils.ts                  # Response helper, verification email
 ├── services/
 │   ├── assistant.ts              # Tool-calling loop, tool definitions, system prompt
-│   └── tasks.ts                  # Validated, user-scoped task operations used by the assistant
+│   ├── tasks.ts                  # Validated, user-scoped task operations used by the assistant
+│   └── topicGuard.ts             # Screens off-topic messages before the tool-calling request
 ├── scripts/
 │   └── hash-plaintext-passwords.ts
 ├── dist/                         # Compiled output (committed, served by Vercel)

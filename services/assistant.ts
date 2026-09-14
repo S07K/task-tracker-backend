@@ -14,6 +14,7 @@ import {
   listTasks,
   updateTask,
 } from "./tasks";
+import { OFF_TOPIC_REPLY, isOnTopic } from "./topicGuard";
 
 // Limits keep each chat request small: Groq's free tier allows ~8K tokens/minute
 // per organization, shared by every user of the app, and small local models
@@ -329,6 +330,13 @@ export async function runAssistant(options: {
     pendingAction: state.pendingDeletes.size ? { type: "delete", tasks: Array.from(state.pendingDeletes.values()) } : null,
     changed: state.actions.length > 0,
   });
+
+  // Screen off-topic messages before the full tool-calling request.
+  const latestMessage = history[history.length - 1].content;
+  const previousReply = [...history].reverse().find((turn) => turn.role === "assistant")?.content;
+  if (!(await isOnTopic({ client, model, message: latestMessage, previousReply }))) {
+    return result(OFF_TOPIC_REPLY);
+  }
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const completion = await client.chat.completions.create({

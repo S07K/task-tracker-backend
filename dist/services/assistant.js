@@ -14,6 +14,7 @@ exports.sanitizeHistory = sanitizeHistory;
 exports.removeTaskIds = removeTaskIds;
 exports.runAssistant = runAssistant;
 const tasks_1 = require("./tasks");
+const topicGuard_1 = require("./topicGuard");
 // Limits keep each chat request small: Groq's free tier allows ~8K tokens/minute
 // per organization, shared by every user of the app, and small local models
 // work best with short contexts.
@@ -257,7 +258,7 @@ function runTool(call, state) {
 }
 function runAssistant(options) {
     return __awaiter(this, void 0, void 0, function* () {
-        var _a, _b, _c, _d;
+        var _a, _b, _c, _d, _e;
         const { client, model, userId, history, now, timeZone, temperature } = options;
         const state = { userId, actions: [], pendingDeletes: new Map(), knownIds: new Set() };
         const messages = [
@@ -282,16 +283,22 @@ function runAssistant(options) {
             pendingAction: state.pendingDeletes.size ? { type: "delete", tasks: Array.from(state.pendingDeletes.values()) } : null,
             changed: state.actions.length > 0,
         });
+        // Screen off-topic messages before the full tool-calling request.
+        const latestMessage = history[history.length - 1].content;
+        const previousReply = (_a = [...history].reverse().find((turn) => turn.role === "assistant")) === null || _a === void 0 ? void 0 : _a.content;
+        if (!(yield (0, topicGuard_1.isOnTopic)({ client, model, message: latestMessage, previousReply }))) {
+            return result(topicGuard_1.OFF_TOPIC_REPLY);
+        }
         for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
             const completion = yield client.chat.completions.create(Object.assign(Object.assign({ model,
                 messages, tools: TOOLS, tool_choice: "auto", max_completion_tokens: MAX_COMPLETION_TOKENS }, (temperature !== undefined ? { temperature } : {})), (model.startsWith("openai/gpt-oss") ? { reasoning_effort: "low" } : {})));
-            const message = (_a = completion.choices[0]) === null || _a === void 0 ? void 0 : _a.message;
-            const toolCalls = (_b = message === null || message === void 0 ? void 0 : message.tool_calls) !== null && _b !== void 0 ? _b : [];
+            const message = (_b = completion.choices[0]) === null || _b === void 0 ? void 0 : _b.message;
+            const toolCalls = (_c = message === null || message === void 0 ? void 0 : message.tool_calls) !== null && _c !== void 0 ? _c : [];
             if (toolCalls.length === 0) {
-                const reply = (_c = message === null || message === void 0 ? void 0 : message.content) === null || _c === void 0 ? void 0 : _c.trim();
+                const reply = (_d = message === null || message === void 0 ? void 0 : message.content) === null || _d === void 0 ? void 0 : _d.trim();
                 return result(reply || summarizeChanges() || "Sorry, I couldn't come up with a reply. Could you try rephrasing?");
             }
-            messages.push({ role: "assistant", content: (_d = message === null || message === void 0 ? void 0 : message.content) !== null && _d !== void 0 ? _d : null, tool_calls: toolCalls });
+            messages.push({ role: "assistant", content: (_e = message === null || message === void 0 ? void 0 : message.content) !== null && _e !== void 0 ? _e : null, tool_calls: toolCalls });
             // Run calls in order so a create followed by an update behaves predictably.
             for (const call of toolCalls) {
                 const output = yield runTool(call, state);
